@@ -20,14 +20,17 @@ export async function bootstrap(): Promise<AppContext> {
   console.log('[MindSet boot] database client created');
   logger.info('Database client ready.');
 
-  const client = createDiscordClient();
+  const client = createDiscordClient(env);
   const scheduler = new SchedulerService(db, logger.child({ component: 'scheduler' }), env.SCHEDULER_WORKER_ID);
 
   const ctx: AppContext = { client, db, env, logger, scheduler };
   registerJobHandlers(ctx);
 
   client.once(Events.ClientReady, (readyClient) => {
-    logger.info({ tag: readyClient.user.tag, id: readyClient.user.id }, 'Discord client ready.');
+    logger.info(
+      { tag: readyClient.user.tag, id: readyClient.user.id, status: env.BOT_STATUS_TEXT },
+      'Discord client ready.',
+    );
   });
 
   client.on(Events.InteractionCreate, (interaction) => {

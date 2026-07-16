@@ -10,6 +10,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   DEFAULT_TIMEZONE: z.string().default('Europe/London'),
+  BOT_STATUS_TEXT: z.string().trim().min(1).max(128).default('In the MindSet'),
 
   SCHEDULER_WORKER_ID: z.string().min(1, 'SCHEDULER_WORKER_ID is required'),
   GRAPHICS_CACHE_DIR: z.string().default('./data/graphics'),
