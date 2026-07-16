@@ -13,10 +13,14 @@ export async function getGroupsByTournament(db: Database, tournamentId: string):
   return db.query.groups.findMany({ where: eq(groups.tournamentId, tournamentId) });
 }
 
+export async function getGroupById(db: Database, id: string): Promise<Group | undefined> {
+  return db.query.groups.findFirst({ where: eq(groups.id, id) });
+}
+
 export async function updateGroupResources(
   db: Database,
   id: string,
-  resources: Partial<Pick<Group, 'roleId' | 'chatChannelId' | 'resultsChannelId' | 'staffChannelId' | 'graphicMessageId' | 'confirmationMessageId' | 'resultsPanelMessageId'>>,
+  resources: Partial<Pick<Group, 'categoryId' | 'roleId' | 'chatChannelId' | 'resultsChannelId' | 'staffChannelId' | 'graphicMessageId' | 'confirmationMessageId' | 'resultsPanelMessageId'>>,
 ): Promise<Group> {
   const [updated] = await db.update(groups).set({ ...resources, updatedAt: new Date() }).where(eq(groups.id, id)).returning();
   if (!updated) throw new Error(`Group ${id} not found`);

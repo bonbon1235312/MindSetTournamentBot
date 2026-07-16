@@ -13,6 +13,11 @@ export const groups = pgTable(
       .references(() => tournaments.id, { onDelete: 'cascade' }),
     groupCode: text('group_code').notNull(),
 
+    /** This group's own Discord category — every group gets one, rather
+     * than sharing a single "Group Stage" category across the whole cup
+     * (Discord caps a category at 50 channels, and staff need each group's
+     * 3 channels visually grouped together anyway). */
+    categoryId: text('category_id'),
     roleId: text('role_id'),
     chatChannelId: text('chat_channel_id'),
     resultsChannelId: text('results_channel_id'),

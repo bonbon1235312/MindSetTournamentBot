@@ -13,6 +13,7 @@ import { generateRoundRobinFixtures } from '../../domain/fixtures/round-robin.js
 import { assertEntryTransition } from '../../domain/entries/state-machine.js';
 import { resolveSchedule } from '../../domain/tournaments/schedule.js';
 import { renderGroupFixturesGraphic } from '../../graphics/renderers/group-fixtures-renderer.js';
+import { buildResultsPanelEmbed, buildResultsPanelComponents } from '../../discord/embeds/results-panel-embed.js';
 import { recordAuditEvent, newCorrelationId } from '../../domain/audit/audit-log.js';
 import type { TemplateSchedule } from '../../database/schema/tournament-templates.js';
 import { DateTime } from 'luxon';
@@ -58,9 +59,6 @@ export async function runGroupPublishPipeline(
 
   const guild = await ctx.client.guilds.fetch(tournament.guildId);
   const config = await getOrCreateGuildConfig(ctx.db, tournament.guildId);
-  if (!config.groupCategoryId || !config.staffCategoryId) {
-    throw new Error(`Guild ${tournament.guildId} is missing group/staff category configuration — run /setup configure`);
-  }
 
   const current = await advanceTournamentTo(ctx.db, tournament, 'GENERATING_GROUPS');
 
@@ -124,6 +122,7 @@ export async function runGroupPublishPipeline(
     // cleanup, which reads chatChannelId etc off this exact return value)
     // need the real IDs, not nulls.
     let currentGroup = await updateGroupResources(ctx.db, group.id, {
+      categoryId: resources.category.id,
       roleId: resources.role.id,
       chatChannelId: resources.chatChannel.id,
       resultsChannelId: resources.resultsChannel.id,
@@ -142,10 +141,11 @@ export async function runGroupPublishPipeline(
     }
 
     const roundRobin = generateRoundRobinFixtures(groupDraw.entries);
+    const createdFixtures = [];
     for (const fixture of roundRobin) {
       const scheduledAt =
         fixture.round === 1 ? schedule.roundOne : fixture.round === 2 ? schedule.roundTwo : schedule.roundThree;
-      await createFixture(ctx.db, {
+      const createdFixture = await createFixture(ctx.db, {
         tournamentId,
         groupId: group.id,
         stage: 'GROUP',
@@ -154,6 +154,14 @@ export async function runGroupPublishPipeline(
         awayEntryId: fixture.away.entry.id,
         scheduledAt: scheduledAt.toJSDate(),
         status: 'SCHEDULED',
+      });
+      createdFixtures.push(createdFixture);
+      await ctx.scheduler.enqueue({
+        tournamentId,
+        jobType: 'FIXTURE_READY',
+        runAt: scheduledAt.toJSDate(),
+        idempotencyKey: `FIXTURE_READY:${createdFixture.id}`,
+        payload: { fixtureId: createdFixture.id },
       });
     }
 
@@ -171,8 +179,24 @@ export async function runGroupPublishPipeline(
       { tournamentName: tournament.name, groupCode, rounds: graphicRounds },
       ctx.env.GRAPHICS_CACHE_DIR,
     );
-    const message = await resources.resultsChannel.send({ files: [{ attachment: graphic.buffer, name: 'group-fixtures.png' }] });
-    currentGroup = await updateGroupResources(ctx.db, group.id, { graphicMessageId: message.id });
+    const message = await resources.chatChannel.send({
+      content: [
+        `${resources.role} you've been drawn into **Group ${groupCode}**!`,
+        `**Teams:** ${groupDraw.entries.map((m) => m.teamName).join(', ')}`,
+        `Submit your results in ${resources.resultsChannel} once a match is played.`,
+      ].join('\n'),
+      files: [{ attachment: graphic.buffer, name: 'group-fixtures.png' }],
+      allowedMentions: { roles: [resources.role.id] },
+    });
+    await message.pin().catch((error) => {
+      ctx.logger.warn({ error, groupCode }, 'Could not pin the fixtures graphic — missing Manage Messages permission');
+    });
+
+    const panelEmbed = await buildResultsPanelEmbed(ctx, createdFixtures, `Group ${groupCode}`);
+    const panelComponents = await buildResultsPanelComponents(ctx, createdFixtures);
+    const panelMessage = await resources.resultsChannel.send({ embeds: [panelEmbed], components: panelComponents });
+
+    currentGroup = await updateGroupResources(ctx.db, group.id, { graphicMessageId: message.id, resultsPanelMessageId: panelMessage.id });
     createdGroups.push(currentGroup);
 
     await recordAuditEvent(ctx.db, ctx.logger, {

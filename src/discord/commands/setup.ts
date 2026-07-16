@@ -7,7 +7,6 @@ import {
   EmbedBuilder,
   RoleSelectMenuBuilder,
   SlashCommandBuilder,
-  StringSelectMenuBuilder,
   type ChatInputCommandInteraction,
   type MessageActionRowComponentBuilder,
   type AnySelectMenuInteraction,
@@ -22,7 +21,6 @@ import { PermissionError } from '../../types/errors.js';
 import { DEFAULT_BRANDING } from '../../config/constants.js';
 
 const NAMESPACE = 'setup';
-const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
 
 export const setupCommand = new SlashCommandBuilder()
   .setName('setup')
@@ -30,6 +28,13 @@ export const setupCommand = new SlashCommandBuilder()
   .addSubcommand((sub) => sub.setName('configure').setDescription('Open the setup wizard'))
   .addSubcommand((sub) => sub.setName('status').setDescription('Show missing configuration'));
 
+/**
+ * Only two pages now — section 12's group-stage/knockout/staff categories
+ * are NOT configured here (the bot creates and remembers those itself the
+ * first time it needs one, see discord-resource-service.ts). This wizard
+ * only covers what genuinely can't be inferred: roles, the rules channel,
+ * the audit log, and the one channel a cup gets posted in.
+ */
 function page1Rows(): ActionRowBuilder<MessageActionRowComponentBuilder>[] {
   return [
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
@@ -64,7 +69,7 @@ function page1Rows(): ActionRowBuilder<MessageActionRowComponentBuilder>[] {
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(encodeCustomId(NAMESPACE, 'nav', 'page2'))
-        .setLabel('Next: Categories & Log →')
+        .setLabel('Next: Channels →')
         .setStyle(ButtonStyle.Primary),
     ),
   ];
@@ -82,25 +87,9 @@ function page2Rows(): ActionRowBuilder<MessageActionRowComponentBuilder>[] {
     ),
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ChannelSelectMenuBuilder()
-        .setCustomId(encodeCustomId(NAMESPACE, 'group_category'))
-        .setPlaceholder('Select the group-stage category')
-        .addChannelTypes(ChannelType.GuildCategory)
-        .setMinValues(1)
-        .setMaxValues(1),
-    ),
-    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new ChannelSelectMenuBuilder()
-        .setCustomId(encodeCustomId(NAMESPACE, 'knockout_category'))
-        .setPlaceholder('Select the knockout category')
-        .addChannelTypes(ChannelType.GuildCategory)
-        .setMinValues(1)
-        .setMaxValues(1),
-    ),
-    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new ChannelSelectMenuBuilder()
-        .setCustomId(encodeCustomId(NAMESPACE, 'staff_category'))
-        .setPlaceholder('Select the staff-only category')
-        .addChannelTypes(ChannelType.GuildCategory)
+        .setCustomId(encodeCustomId(NAMESPACE, 'tournament_channel'))
+        .setPlaceholder('Select the tournament sign-up channel')
+        .addChannelTypes(ChannelType.GuildText)
         .setMinValues(1)
         .setMaxValues(1),
     ),
@@ -110,49 +99,9 @@ function page2Rows(): ActionRowBuilder<MessageActionRowComponentBuilder>[] {
         .setLabel('← Back')
         .setStyle(ButtonStyle.Secondary),
       new ButtonBuilder()
-        .setCustomId(encodeCustomId(NAMESPACE, 'nav', 'page3'))
-        .setLabel('Next: Weekday Channels →')
-        .setStyle(ButtonStyle.Primary),
-    ),
-  ];
-}
-
-function page3Rows(): ActionRowBuilder<MessageActionRowComponentBuilder>[] {
-  return [
-    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(encodeCustomId(NAMESPACE, 'weekday_pick'))
-        .setPlaceholder('Pick a weekday to assign its tournament channel')
-        .addOptions(WEEKDAYS.map((day) => ({ label: day[0]!.toUpperCase() + day.slice(1), value: day }))),
-    ),
-    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(encodeCustomId(NAMESPACE, 'nav', 'page2'))
-        .setLabel('← Back')
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
         .setCustomId(encodeCustomId(NAMESPACE, 'nav', 'done'))
         .setLabel('Finish')
         .setStyle(ButtonStyle.Success),
-    ),
-  ];
-}
-
-function weekdayChannelRow(day: string): ActionRowBuilder<MessageActionRowComponentBuilder>[] {
-  return [
-    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new ChannelSelectMenuBuilder()
-        .setCustomId(encodeCustomId(NAMESPACE, 'weekday_channel', day))
-        .setPlaceholder(`Select the ${day} tournament channel`)
-        .addChannelTypes(ChannelType.GuildText)
-        .setMinValues(1)
-        .setMaxValues(1),
-    ),
-    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(encodeCustomId(NAMESPACE, 'nav', 'page3'))
-        .setLabel('← Back to weekday list')
-        .setStyle(ButtonStyle.Secondary),
     ),
   ];
 }
@@ -188,7 +137,7 @@ export async function executeSetupCommand(interaction: ChatInputCommandInteracti
   }
 
   await interaction.reply({
-    embeds: [pageEmbed('MindSet Tournament Bot Setup — Page 1/3', 'Roles & rules channel. Every selection saves immediately.')],
+    embeds: [pageEmbed('MindSet Tournament Bot Setup — Page 1/2', 'Roles & rules channel. Every selection saves immediately.')],
     components: page1Rows(),
     ephemeral: true,
   });
@@ -257,50 +206,19 @@ export async function handleSetupComponent(
       await interaction.reply({ content: `✅ Audit log channel set to <#${interaction.values[0]}>`, ephemeral: true });
       return;
     }
-    case 'group_category': {
+    case 'tournament_channel': {
       if (!interaction.isChannelSelectMenu()) return;
-      await auditAndSave({ groupCategoryId: interaction.values[0]! }, 'group category');
-      await interaction.reply({ content: `✅ Group category set.`, ephemeral: true });
-      return;
-    }
-    case 'knockout_category': {
-      if (!interaction.isChannelSelectMenu()) return;
-      await auditAndSave({ knockoutCategoryId: interaction.values[0]! }, 'knockout category');
-      await interaction.reply({ content: `✅ Knockout category set.`, ephemeral: true });
-      return;
-    }
-    case 'staff_category': {
-      if (!interaction.isChannelSelectMenu()) return;
-      await auditAndSave({ staffCategoryId: interaction.values[0]! }, 'staff category');
-      await interaction.reply({ content: `✅ Staff category set.`, ephemeral: true });
-      return;
-    }
-    case 'weekday_pick': {
-      if (!interaction.isStringSelectMenu()) return;
-      const day = interaction.values[0]!;
-      await interaction.update({
-        embeds: [pageEmbed(`Weekday Channel — ${day[0]!.toUpperCase() + day.slice(1)}`, 'Select the tournament announcement channel for this weekday.')],
-        components: weekdayChannelRow(day),
-      });
-      return;
-    }
-    case 'weekday_channel': {
-      if (!interaction.isChannelSelectMenu()) return;
-      const day = parts[0]!;
-      const updatedChannels = { ...config.tournamentChannels, [day]: interaction.values[0]! };
-      await auditAndSave({ tournamentChannels: updatedChannels }, `${day} tournament channel`);
-      await interaction.reply({ content: `✅ ${day[0]!.toUpperCase() + day.slice(1)} channel set to <#${interaction.values[0]}>`, ephemeral: true });
+      await auditAndSave({ tournamentChannelId: interaction.values[0]! }, 'tournament channel');
+      await interaction.reply({ content: `✅ Tournament channel set to <#${interaction.values[0]}>`, ephemeral: true });
       return;
     }
     case 'nav': {
       if (!interaction.isButton()) return;
       const target = parts[0];
       if (target === 'page1') {
-        await interaction.update({ embeds: [pageEmbed('MindSet Tournament Bot Setup — Page 1/3', 'Roles & rules channel.')], components: page1Rows() });
+        await interaction.update({ embeds: [pageEmbed('MindSet Tournament Bot Setup — Page 1/2', 'Roles & rules channel.')], components: page1Rows() });
       } else if (target === 'page2') {
-        await interaction.update({ embeds: [pageEmbed('MindSet Tournament Bot Setup — Page 2/3', 'Categories & audit log.')], components: page2Rows() });
-      } else if (target === 'page3') {
-        await interaction.update({ embeds: [pageEmbed('MindSet Tournament Bot Setup — Page 3/3', 'Weekday tournament channels.')], components: page3Rows() });
+        await interaction.update({ embeds: [pageEmbed('MindSet Tournament Bot Setup — Page 2/2', 'Audit log & tournament channel.')], components: page2Rows() });
       } else if (target === 'done') {
         const refreshed = await getOrCreateGuildConfig(ctx.db, interaction.guildId!);
         const status = checkGuildConfigStatus(refreshed);

@@ -51,6 +51,13 @@ export class SignupClosedError extends AppError {
   }
 }
 
+export class TournamentAlreadyActiveError extends AppError {
+  readonly code = 'TOURNAMENT_ALREADY_ACTIVE';
+  constructor(activeTournamentName: string) {
+    super(`Only one cup runs at a time, and **${activeTournamentName}** is still in progress. Finish or cancel it first.`);
+  }
+}
+
 export class PaymentNotConfirmedError extends AppError {
   readonly code = 'PAYMENT_NOT_CONFIRMED';
   constructor() {

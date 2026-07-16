@@ -24,6 +24,7 @@ import {
   handleAdminButton,
 } from '../components/announcement-actions.js';
 import { handleOpenTicketButton, handleClaimTicketButton, handleCloseTicketButton } from '../components/ticket-flow.js';
+import { handleFixtureSelect, handleSubmitResultModal, handleStaffOverrideModal, handleConflictResolutionButton } from '../components/result-submission-flow.js';
 
 /**
  * Single entry point for every Discord interaction. This is the "global
@@ -106,6 +107,27 @@ export async function routeInteraction(interaction: Interaction, ctx: AppContext
             const tournamentId = parts[0]!;
             const entryId = parts[1]!;
             await handleCoManagerChangeSelect(interaction, ctx, tournamentId, entryId);
+          }
+          return;
+        }
+
+        case 'fixture': {
+          if (action === 'select' && interaction.isStringSelectMenu()) {
+            await handleFixtureSelect(interaction, ctx);
+          } else if (action === 'submit_modal' && interaction.isModalSubmit()) {
+            const fixtureId = parts[0]!;
+            const submittingEntryId = parts[1]!;
+            await handleSubmitResultModal(interaction, ctx, fixtureId, submittingEntryId);
+          } else if (action === 'staff_modal' && interaction.isModalSubmit()) {
+            const fixtureId = parts[0]!;
+            await handleStaffOverrideModal(interaction, ctx, fixtureId);
+          }
+          return;
+        }
+
+        case 'result_conflict': {
+          if (interaction.isButton()) {
+            await handleConflictResolutionButton(interaction, ctx, parts[0]!);
           }
           return;
         }

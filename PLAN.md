@@ -36,12 +36,15 @@ src/
                               including discord-resource-service.ts (idempotent role/channel
                               creation) and tournament-progression-service.ts (status walker)
   graphics/
-    svg/                     escape.ts (XSS-safe text), base.ts (shared brand chrome)
+    svg/                     escape.ts (XSS-safe text), base.ts (monochrome brand chrome + logo helper), logo.ts (base64 data URI)
+    assets/                  mindset-logo.jpg — copied into dist/ by a postbuild step (see package.json)
     templates/                Pure functions: input data -> SVG string
     renderers/                SVG string -> cached PNG via Sharp
   workers/
-    job-handlers/             Scheduler job handlers — PREMIUM_CUTOFF, SIGNUP_CLOSE,
-                               GROUP_PUBLISH implemented; the rest are gaps (see below)
+    job-handlers/             GROUP_PUBLISH is scheduler-registered; knockout-publish-handler.ts
+                               (runInitialKnockoutDraw/advanceKnockoutRound) is invoked directly
+                               today (by /tournament test), not yet scheduler-driven — see
+                               "Known gaps": it depends on result submission, which isn't built.
   types/                     AppContext, typed AppError hierarchy
   utils/                     logger.ts (Pino), seeded-random.ts (audit-reproducible shuffles)
 
@@ -106,6 +109,31 @@ verified: an actual button click through the full open/claim/close flow
 in Discord (no second Discord account available to click as a "user"
 distinct from staff in this session).
 
+## Tournament model: one cup at a time, everything auto-created
+
+The original spec's literal wording (a per-weekday channel map, staff
+manually linking group/knockout/staff categories via `/setup`, a 40-team
+cap on `/tournament test`) didn't match the real deployment: this guild
+runs one cash cup at a time, posted in one fixed sign-up channel, with no
+category-linking step at all. Corrected:
+
+- `guild_configs.tournamentChannelId` replaces the old per-weekday
+  `tournamentChannels` map — one channel, set via `/setup` or directly.
+- `getActiveTournamentForGuild()` + `TournamentAlreadyActiveError` block
+  `/tournament create` while any non-finished tournament exists for the
+  guild — enforced in code, not just documentation.
+- `/tournament test`'s `team_count` has no upper bound.
+- **No category is ever staff-linked.** Every group gets its own category
+  (`groups.categoryId`, named "Group A") and every knockout round gets its
+  own category (`knockout_rounds.categoryId`, named "Quarter Finals" etc.),
+  auto-created and cached the first time each is needed
+  (`discord-resource-service.ts`'s `ensureGroupResources`/
+  `ensureKnockoutRoundResources`). `guild_configs` carries zero
+  category-cache columns as a result — a deliberate change from an earlier
+  draft that gave every group a *shared* "Group Stage" category, which
+  would hit Discord's 50-channel-per-category cap on any double-digit-group
+  cup and cluttered the channel list.
+
 ## Group publish pipeline (the tournament clock's first real action)
 
 `workers/job-handlers/group-publish-handler.ts` is the section 11-14
@@ -142,33 +170,148 @@ The pipeline above was extracted into `runGroupPublishPipeline()` (options:
 `{ groupCodePrefix }`) specifically so `discord/commands/tournament-test.ts`
 could call the *exact* production code path synchronously instead of
 duplicating it. `groupCodePrefix` exists because `ensureGroupResources`
-resolves Discord channels by literal name — without a unique prefix per
-test run, a test could silently find and reuse (and post fake fixtures
-into) a **real** live tournament's actual "Group A" channels. Every test
-run gets a random `test-<8-hex>-` prefix.
+resolves Discord channels by literal name — without a prefix, a test could
+silently find and reuse (and post fake fixtures into) a **real** live
+tournament's actual "Group A" channels. This is a static `'TEST-'` prefix,
+not a random one — the only thing that genuinely needs to stay unique is
+TEST vs. a real cup's plain "A"/"B"/... codes (there is never more than one
+of those live, per the one-cup-at-a-time rule above), so a random suffix
+was pure noise in the channel list for no real safety benefit.
 
-Creates N fake clubs/entries (`team_count`, default 8, using the staff
-member running the command as manager on all of them so real Discord role-
-assignment is genuinely exercised, not just its failure path), runs the
-pipeline, verifies membership/fixture counts and that every Discord
-resource + the graphic actually got created, and reports each phase
-✅/❌ with the real error message on failure. Defaults to deleting
-everything it created afterward (`cleanup:false` to leave it for manual
-inspection instead).
+Creates N fake clubs/entries (`team_count`, default 8, uncapped, using the
+staff member running the command as manager on all of them so real Discord
+role-assignment is genuinely exercised, not just its failure path), runs
+the group-publish pipeline, then **simulates every group fixture's result**
+(random scores, draws allowed) so the knockout pipeline below has real data
+to compute from, then runs it through to a champion. Verifies every phase
+(membership/fixture counts, every Discord category/role/channel, every
+graphic) and reports ✅/❌ per phase with the real error message on
+failure. Defaults to deleting everything it created afterward
+(`cleanup:false` to leave it for manual inspection instead).
 
-**A real bug was caught by testing this against the live guild, not just
-typechecking it**: the first implementation returned each group's
-*pre-resource-attachment* database row from the pipeline (captured right
-after `createGroup()`, before the later `updateGroupResources()` calls
-that attach `roleId`/`chatChannelId`/etc.). That meant the verification
-phase would always report groups as "missing a Discord role or channel"
-even when they weren't, and cleanup would silently skip deleting the real
-Discord role and channels it had created — leaking them into the guild
-every run. Fixed by threading the updated row through instead of the
-stale one; re-ran the same live test (including a decoy channel planted
-in advance to prove the group-code-prefix collision guard actually works)
-and confirmed the fix, then swept the whole guild and database for any
-residue from the earlier buggy run and confirmed none was left.
+**Two real bugs were caught by testing this against the live guild, not
+just typechecking it.** First: the group-publish pipeline originally
+returned each group's *pre-resource-attachment* database row (captured
+right after `createGroup()`, before the later `updateGroupResources()`
+calls that attach `roleId`/`chatChannelId`/etc.), so the verification phase
+always falsely reported groups as missing a Discord role/channel, and
+cleanup silently skipped deleting the real ones it had created — fixed by
+threading the updated row through instead of the stale one. Second, while
+wiring the knockout pipeline in: `runInitialKnockoutDraw` was called with
+the tournament object captured at test-run start, but `runGroupPublishPipeline`
+advances that tournament's status (and bumps its `version`) several times
+internally — passing the stale object straight into the knockout draw's
+own `advanceTournamentTo` call failed optimistic-locking with a
+`StalePanelError`. Fixed by re-fetching the tournament immediately before
+the knockout draw. Both were live, not hypothetical — the same silent
+Discord-resource-leak class of bug in the first case, and a real 500-style
+failure in the second.
+
+## Knockout pipeline (section 21/22/23)
+
+`workers/job-handlers/knockout-publish-handler.ts` — two entry points:
+
+- `runInitialKnockoutDraw(ctx, tournament)`: computes standings for every
+  group from its RESOLVED fixtures (`domain/standings/standings.ts`), runs
+  the qualification engine (`domain/qualification/qualification.ts` — auto
+  qualifiers, third-place/wildcard fallback, shortfall warning), draws the
+  first round (`domain/knockouts/knockout-draw.ts`'s fully-random
+  `drawKnockoutPairings` — no seeding, no protecting group winners, matching
+  the spec), and publishes it. An odd qualifier count surviving the
+  shortfall fallback (a documented, extremely-small-tournament edge case)
+  drops the lowest-ranked qualifier to force an even bracket, with a staff
+  warning logged — the domain layer deliberately never invents a bye.
+- `advanceKnockoutRound(ctx, tournament)`: call once the current round's
+  fixtures are all RESOLVED. Eliminates losers, and either draws + publishes
+  the next round from the winners, or — once exactly one team remains —
+  marks them tournament `WINNER`, advances the tournament to `COMPLETED`,
+  and posts a champion announcement.
+
+Every round gets its own category + role + 3 channels
+(`ensureKnockoutRoundResources`, same idempotent by-id-then-by-name-then-
+create pattern as groups), a ping in its chat channel, and a bracket
+graphic in its results channel. Entry statuses walk
+`GROUPED → ACTIVE → (ELIMINATED | WINNER)` through the whole stage, exactly
+per the section 45 state machine (no shortcut transitions).
+
+**There is no automatic trigger yet.** Nothing currently calls
+`runInitialKnockoutDraw` on its own — it depends on every group fixture
+being RESOLVED, and dual-sided result submission (the feature that would
+normally resolve a group fixture) isn't built (see "Known gaps"). Today
+it's invoked directly, by `/tournament test`'s simulation. Once result
+submission exists, the natural trigger is "last group fixture in the
+tournament just resolved."
+
+**Verified live end-to-end** against the real database and the real
+"Mindset HUB" guild: an 8-team, 2-group cup ran through Semi Finals → Final,
+producing a real champion, with every round's category/role/channels/
+graphic confirmed present in Discord before cleanup removed all of it.
+
+## Result submission (section 18/24) — the gap this closes
+
+The previous version of this plan flagged dual-sided result submission as
+the one thing standing between "everything else is built" and "a real cup
+can actually run end to end." It's now built.
+
+**Fixtures graphic moved to the chat channel, pinned.** It used to post to
+the results channel; now it posts to chat (alongside the "you've been
+drawn" ping) and gets pinned there, so it's the first thing anyone sees
+when they open the channel. The results channel is reserved for the
+results panel below.
+
+**`FIXTURE_READY` job** (`workers/job-handlers/fixture-ready-handler.ts`,
+now registered — no longer a gap): a fixture starts `SCHEDULED` and can't
+accept a result until its scheduled kickoff time arrives. One job is
+enqueued per fixture at creation time (`runAt` = the fixture's
+`scheduledAt` for group fixtures, or immediately for knockout fixtures,
+which don't have a pre-planned slot — see the knockout pipeline section).
+It walks `SCHEDULED -> READY -> WAITING_FOR_SUBMISSIONS`, both legal hops
+per section 45's fixture state machine, idempotently (already-past-SCHEDULED
+is a safe no-op — verified live: the real scheduler's own 5-second poll
+raced a manual invocation during testing and both landed cleanly).
+
+**Results panel** (`discord/embeds/results-panel-embed.ts` +
+`discord/components/result-submission-flow.ts`): posted to the results
+channel the moment a group/round is published, listing every fixture with
+a live status line and a select menu of everything currently submittable.
+Picking a fixture shows a score modal — "Your score / Opponent's score"
+for a manager or co-manager (whichever side they're on, detected server-
+side, never trusted from the client), "Home score / Away score" for staff
+(who aren't tied to a side). Knockout fixtures get two extra optional
+penalty fields; group fixtures don't (a draw is a valid group result,
+enforced by rejecting `PENALTIES` on a group submission).
+
+**Submission processing** (`services/result-submission-service.ts`) reuses
+the pre-existing, already-tested domain layer verbatim —
+`normalizeSubmission`/`submissionsMatch` (section 18) and
+`validateKnockoutResult` (section 24) were built and unit-tested earlier in
+this project but had nothing calling them until now. A submission is
+stored as a new `result_submissions` row (previous one from the same entry
+deactivated, not deleted — full revision history survives); if the
+opponent hasn't submitted yet the fixture moves to
+`WAITING_FOR_OPPONENT`; once both sides are in, matching submissions
+silently auto-resolve the fixture (`resolutionSource: DUAL_SUBMISSION`),
+mismatched ones move it to `RESULT_CONFLICT` and post a conflict panel to
+the staff channel. Staff input always resolves immediately — no matching
+needed, it's authoritative.
+
+**Staff conflict panel**: shows both submissions side by side with buttons
+to accept either one or manually override with a fresh score — same modal
+shape as a normal staff submission. The results panel refreshes in place
+(edited, not reposted) after every submission or resolution.
+
+**Verified live** against the real database and the real "Mindset HUB"
+guild: matching dual submissions auto-resolved correctly
+(`DUAL_SUBMISSION`, correct score); mismatched submissions correctly
+entered `RESULT_CONFLICT`; a staff override correctly resolved it
+(`STAFF_OVERRIDE`, correct score). What couldn't be verified interactively
+is the actual button-click/modal-submit UI itself — there's no second
+Discord account available in this session to click as a "user" distinct
+from staff (same limitation noted for the ticket system) — so verification
+went through the same service functions the real Discord handlers call,
+not the handlers themselves. The panel-embed rendering logic (status
+lines, score formatting) was checked by direct code review rather than a
+live round-trip for the same reason.
 
 ## Domain logic (pure functions, fully unit-tested)
 
@@ -208,11 +351,25 @@ end-to-end, not just type-checked).
 `graphics/svg/` + `graphics/templates/` + `graphics/renderers/` form a
 three-layer pipeline: typed input → escaped/truncated SVG string → Sharp
 rasterization → disk-cached PNG keyed by a content hash of the SVG. Group
-fixtures and group standings templates are implemented and verified
-end-to-end (real PNG output visually inspected, XML injection/mass-mention
-team names confirmed non-crashing, content-hash cache-hit/miss behavior
-confirmed). Knockout bracket and winner-announcement templates are not yet
-built — see "Known gaps."
+fixtures, group standings, and the knockout bracket templates are all
+implemented and verified (real PNG output visually inspected — locally
+rendered and viewed before ever touching Discord, then confirmed again in
+the live guild — XML injection/mass-mention team names confirmed
+non-crashing, content-hash cache-hit/miss behavior confirmed).
+Winner-announcement is a plain Discord message today, not a graphic — see
+"Known gaps."
+
+**Deliberately monochrome**, matching the MindSet shield logo
+(`graphics/assets/mindset-logo.jpg`, embedded as a base64 data URI via
+`graphics/svg/logo.ts` — no network fetch, no separate asset upload). This
+palette (`BRAND` in `graphics/svg/base.ts`) is scoped to the graphics
+pipeline only and is independent of `DEFAULT_BRANDING`
+(`config/constants.ts`), which still drives Discord embed accent colors
+elsewhere in the bot — changing one doesn't silently change the other.
+`npm run build`'s postbuild step copies `graphics/assets/` into `dist/` so
+the logo is available under the `dist`-based `npm start` path too, even
+though production actually runs via `ts-node` against `src/` directly (see
+the Pterodactyl egg's fixed startup command) and doesn't strictly need it.
 
 ## Phase status
 
@@ -222,16 +379,17 @@ built — see "Known gaps."
 | 2. Database schema, migrations, repositories (partial — see gaps), audit logging, state machines | ✅ Core done, repository coverage incomplete |
 | 3. Domain logic — scheduling, standings, qualification, groups, nicknames | ✅ Done, 100% unit-tested |
 | 4. Scheduler engine with DB-backed job claiming | ✅ Done, verified live against real DB |
-| 5. Graphics rendering (SVG → PNG via Sharp) | ✅ Group fixtures + standings done and verified; knockout bracket not built |
+| 5. Graphics rendering (SVG → PNG via Sharp) | ✅ Group fixtures, standings, and knockout bracket all done and verified — monochrome + logo |
 | 6. Discord interaction layer — setup, announcement, signup, payments | 🟡 Substantially built (see gaps) |
-| 7. Result submission (group + knockout dual-sided) | ❌ Not built |
+| 7. Result submission (group + knockout dual-sided) | ✅ Done, verified live — results panel, submission matching/conflict, staff override |
 | 8. Automated tests | ✅ 144 tests, all passing, covering every pure domain module |
 | 9. Documentation | ✅ This file + README.md |
 | 10. Build validation | ✅ Clean typecheck, clean lint, all tests passing |
 | 11. Welcome / goodbye | 🟡 Built, blocked on the GuildMembers portal toggle (see above) |
 | 12. Ticket system | ✅ Done, verified against real DB + command deployment |
-| 13. Scheduler job handlers (PREMIUM_CUTOFF, SIGNUP_CLOSE, GROUP_PUBLISH) | ✅ Done, verified live end-to-end including real Discord resource creation |
-| 14. `/tournament test` diagnostic command | ✅ Done, verified live — caught and fixed a real bug in the pipeline it exercises |
+| 13. Scheduler job handlers (PREMIUM_CUTOFF, SIGNUP_CLOSE, GROUP_PUBLISH, FIXTURE_READY) | ✅ Done, verified live end-to-end including real Discord resource creation |
+| 14. `/tournament test` diagnostic command | ✅ Done, verified live — exercises group AND knockout pipelines through to a champion |
+| 15. Knockout pipeline (draw, per-round Discord resources, bracket graphic) | ✅ Done, verified live end-to-end |
 
 ## Known gaps (honest, not glossed over)
 
@@ -240,38 +398,43 @@ half-built and might silently misbehave — each one below either doesn't
 exist yet or exists as infrastructure with nothing wired into it:
 
 1. **Most job handlers still aren't registered.** `PREMIUM_CUTOFF`,
-   `SIGNUP_CLOSE`, and `GROUP_PUBLISH` are done and verified live — the
-   tournament clock now actually generates groups. But
+   `SIGNUP_CLOSE`, `GROUP_PUBLISH`, and `FIXTURE_READY` are done and
+   verified live — the tournament clock now actually generates groups and
+   opens fixtures for submission automatically at kickoff. But
    `GROUP_CONFIRMATION_REMINDER`, `GROUP_CONFIRMATION_DEADLINE`,
-   `FIXTURE_READY`, `RESULT_FIRST_REMINDER`, `RESULT_STAFF_ALERT`,
-   `PRIZE_DETAILS_DEADLINE`, and `MIDNIGHT_CLEANUP` have no handler and
-   will dead-letter if ever enqueued (nothing currently enqueues them
-   either).
-2. **Several repositories still don't exist**: `result-submissions`,
-   `knockout-rounds`, `payments`, and `graphics` have no repository layer
-   (groups/group-memberships/fixtures were added this round). Anything
-   touching result submission, knockout progression, or payment/graphic
-   history needs these written first.
-3. **Knockout Discord resource creation doesn't exist.** Section 23's
-   per-stage roles/channels have no equivalent of the group pipeline yet —
-   `discord-resource-service.ts` only has `ensureGroupResources`.
-4. **No result-submission UI.** The `Submit Result` button, fixture
-   selection menu, and score modal (section 18/24) don't exist — group
-   fixtures now get created and scheduled, but nobody can report a result
-   yet.
-5. **No knockout bracket graphic.** Group fixtures/standings are done;
-   `KNOCKOUT_BRACKET` and `WINNER_ANNOUNCEMENT` graphic types are defined in
-   the schema enum but have no template/renderer.
-6. **No midnight cleanup or repair system** (sections 33/34).
-7. **No evidence/dispute system** (section 28).
-8. **Staff override controls beyond the payment panel** (section 26/27) —
-   group/knockout staff actions (void fixture, forfeit, disqualify, force
-   progression, etc.) are not built.
-9. **Welcome/goodbye is blocked** on the GuildMembers privileged intent not
+   `RESULT_FIRST_REMINDER`, `RESULT_STAFF_ALERT`, `PRIZE_DETAILS_DEADLINE`,
+   and `MIDNIGHT_CLEANUP` have no handler and will dead-letter if ever
+   enqueued (nothing currently enqueues them either — an overdue fixture
+   just sits `WAITING_FOR_SUBMISSIONS`/`WAITING_FOR_OPPONENT` forever with
+   no reminder or staff alert, since `OVERDUE` is a legal status nothing
+   currently transitions a fixture into).
+2. **`payments` and `graphics` repositories still don't exist** (groups/
+   group-memberships/fixtures/knockout-rounds/result-submissions all have
+   one now). Anything touching payment or graphic-cache history as its own
+   queryable entity needs these written first — payment status itself is
+   already readable off `tournament_entries` directly, this is only about
+   the `payments`/`graphics` history tables.
+3. **`WINNER_ANNOUNCEMENT` is a plain Discord message, not a graphic.** The
+   schema enum defines it as a graphic type; today `advanceKnockoutRound`
+   just posts `🏆 **Team** are the champions` as text. Not asked for in
+   this round's scope — flagging it rather than silently shipping half of
+   what the enum implies exists.
+4. **No midnight cleanup or repair system** (sections 33/34) — includes no
+   automatic mechanism to catch a tournament stuck mid-knockout-stage, and
+   no `OVERDUE` transition for a fixture nobody ever submits a result for.
+5. **No evidence/dispute system** (section 28) — the conflict panel lets
+   staff accept a submission or manually override; there's no "request
+   evidence" button or a place to attach screenshots.
+6. **Staff override controls beyond payments and result conflicts**
+   (section 26/27) — void fixture, forfeit, disqualify, force progression,
+   etc. are not built.
+7. **Welcome/goodbye is blocked** on the GuildMembers privileged intent not
    yet being enabled in the Discord Developer Portal (see above) — this is
    the one gap that isn't a missing-code problem, it's an external toggle.
 
 None of the above is faked, stubbed with a `TODO`, or backed by in-memory
 state pretending to be real — they simply don't exist in the codebase yet.
-Building them is the direct continuation of this plan: result submission is
-the natural next step now that fixtures actually get created.
+Every pipeline a real cup needs to run start-to-finish — signup, payment,
+groups, results, knockouts, a declared champion — is now built and
+verified live. What's left is reminders/alerts/cleanup around the edges
+and staff tooling for edge cases, not anything on the critical path.

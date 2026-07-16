@@ -1,8 +1,12 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, notInArray, sql } from 'drizzle-orm';
 import type { Database } from '../client.js';
 import { tournaments, type NewTournament, type Tournament } from '../schema/index.js';
 import { assertVersionedUpdate } from '../transactions/optimistic-lock.js';
 import type { TournamentStatus } from '../../domain/tournaments/state-machine.js';
+
+/** Statuses that mean "this cup is over" — anything else counts as active
+ * for the "one cup at a time" rule. */
+const FINISHED_STATUSES: TournamentStatus[] = ['COMPLETED', 'CANCELLED', 'CLEANING_UP', 'CLEANED'];
 
 export async function createTournament(db: Database, values: NewTournament): Promise<Tournament> {
   const [created] = await db.insert(tournaments).values(values).returning();
@@ -12,6 +16,14 @@ export async function createTournament(db: Database, values: NewTournament): Pro
 
 export async function getTournamentById(db: Database, id: string): Promise<Tournament | undefined> {
   return db.query.tournaments.findFirst({ where: eq(tournaments.id, id) });
+}
+
+/** One cup at a time: returns the guild's currently in-progress tournament,
+ * if any, so /tournament create can refuse to start a second one. */
+export async function getActiveTournamentForGuild(db: Database, guildId: string): Promise<Tournament | undefined> {
+  return db.query.tournaments.findFirst({
+    where: and(eq(tournaments.guildId, guildId), notInArray(tournaments.status, FINISHED_STATUSES)),
+  });
 }
 
 export async function updateTournamentStatus(

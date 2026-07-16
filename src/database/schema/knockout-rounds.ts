@@ -16,6 +16,9 @@ export const knockoutRounds = pgTable('knockout_rounds', {
   roundIndex: integer('round_index').notNull(),
   status: knockoutRoundStatusEnum('status').notNull().default('PENDING'),
 
+  /** This round's own Discord category (e.g. "Quarter Finals") — same
+   * per-item-own-category model as groups.categoryId. */
+  categoryId: text('category_id'),
   chatChannelId: text('chat_channel_id'),
   resultsChannelId: text('results_channel_id'),
   staffChannelId: text('staff_channel_id'),

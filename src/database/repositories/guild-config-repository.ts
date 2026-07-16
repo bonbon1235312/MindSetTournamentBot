@@ -43,19 +43,19 @@ export interface GuildConfigStatus {
   missing: string[];
 }
 
-/** Section 35: "/setup status command showing missing configuration." */
+/**
+ * "/setup status command showing missing configuration." Group/knockout/
+ * staff categories are deliberately NOT checked here — the bot creates
+ * those itself on demand (see discord-resource-service.ts), staff never
+ * need to link them.
+ */
 export function checkGuildConfigStatus(config: GuildConfig): GuildConfigStatus {
   const missing: string[] = [];
 
   if (config.adminRoleIds.length === 0) missing.push('Admin role(s)');
   if (!config.rulesChannelId) missing.push('Rules channel');
   if (!config.auditLogChannelId) missing.push('Audit log channel');
-  if (!config.groupCategoryId) missing.push('Group category');
-  if (!config.knockoutCategoryId) missing.push('Knockout category');
-  if (!config.staffCategoryId) missing.push('Staff category');
-  if (Object.keys(config.tournamentChannels).length === 0) {
-    missing.push('At least one weekday tournament channel');
-  }
+  if (!config.tournamentChannelId) missing.push('Tournament sign-up channel');
 
   return { configured: missing.length === 0, missing };
 }

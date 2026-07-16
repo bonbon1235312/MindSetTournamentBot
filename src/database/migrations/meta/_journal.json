@@ -15,6 +15,27 @@
       "when": 1784217806926,
       "tag": "0001_fair_kinsey_walden",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784325600000,
+      "tag": "0002_guild_config_tournament_channel",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784325700000,
+      "tag": "0003_group_category_per_group",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784325800000,
+      "tag": "0004_knockout_round_category",
+      "breakpoints": true
     }
   ]
 }

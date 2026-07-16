@@ -7,16 +7,20 @@ progression, all driven by buttons, modals, and dropdowns rather than slash
 commands for normal users. Also includes a self-provisioning support
 ticket system and welcome/goodbye messages.
 
-> **Current status:** the foundation (schema, domain logic, scheduler
-> engine, graphics pipeline, signup/payment Discord flow) is built and
-> verified. The tournament clock now actually fires: signups close and
-> groups get generated — Discord roles/channels created, fixtures
-> scheduled, graphics posted — automatically at kickoff, verified live.
-> Result submission and knockout progression are **not yet wired up** — see
-> [PLAN.md](./PLAN.md#known-gaps) for the exact list before relying on this
-> in production. Welcome/goodbye messages are built but **blocked**: they
-> need the GuildMembers privileged intent enabled in the Discord Developer
-> Portal (Bot tab → Server Members Intent) — see below.
+> **Current status:** every pipeline a real cup needs to run start-to-finish
+> is built and verified live — signup, payment tracking, groups, dual-sided
+> result submission (with staff conflict resolution), knockout progression,
+> and a declared champion. The tournament clock fires automatically:
+> signups close, groups get generated, fixtures open for submission at
+> kickoff, and once results come in the knockout stage draws and plays
+> itself out to a winner — all without staff intervention. What's left
+> (reminders, staff alerts, midnight cleanup, an evidence/dispute system)
+> is edge-case tooling, not anything on the critical path — see
+> [PLAN.md](./PLAN.md#known-gaps) for the exact list. Welcome/goodbye
+> messages are built but **blocked**: they need the GuildMembers privileged
+> intent enabled in the Discord Developer Portal (Bot tab → Server Members
+> Intent) — see below. Only one cash cup runs at a time per server, posted
+> to one fixed sign-up channel — see "Creating a tournament" below.
 
 ## Feature list
 
@@ -41,12 +45,19 @@ ticket system and welcome/goodbye messages.
   next power of two, and an explicit wildcard fallback for the rare case
   where even every third-place team can't reach the target — never
   generates a bye
-- Unbiased random knockout draw with extra-time/penalties-aware result
-  validation
-- Dual-sided result submission with home/away normalization regardless of
-  which side reports, silent auto-resolve on a match, staff-alerting
-  conflict detection on a mismatch
-- Branded SVG→PNG tournament graphics (group fixtures, group standings),
+- Full knockout pipeline: unbiased random draw (no seeding, no protecting
+  group winners), a category + role + 3 channels auto-created per round
+  exactly like groups, a bracket graphic, and champion declaration —
+  verified live through a full Semi Finals → Final run to a real winner
+- Dual-sided result submission: a results-panel embed per group/round with
+  a fixture picker, home/away-normalized score modals (manager, co-manager,
+  or staff), silent auto-resolve when both sides agree, and a staff
+  conflict panel when they don't — verified live end-to-end (matching
+  submissions, a mismatch, and a staff override all confirmed)
+- Fixtures graphic posted and pinned at the top of each group/round's chat
+  channel; the results channel is reserved for the results panel
+- Branded, monochrome SVG→PNG tournament graphics (group fixtures, group
+  standings, knockout bracket) with the MindSet shield logo embedded,
   rendered via Sharp with content-hash caching so unchanged data never
   re-renders
 - Database-backed job scheduler (`FOR UPDATE SKIP LOCKED` row-locking, so
@@ -113,6 +124,7 @@ it needs):
 - Embed Links
 - Attach Files (for rendered graphics)
 - Read Message History
+- Manage Messages (to pin the fixtures/bracket graphic in each chat channel)
 - Manage Nicknames
 - Add Reactions
 - Use Application Commands
@@ -230,22 +242,27 @@ Deploys `/setup`, `/tournament`, `/payments`, `/ticket-panel`. Controlled by
 
 ## First-time `/setup`
 
-Run `/setup configure` as a server administrator. It walks through role
-selectors (admin/staff roles, premium role, participant role), channel
-selectors (rules channel, audit-log channel), category selectors (group
-category, knockout category, staff category), and per-weekday tournament
-channel assignment. Run `/setup status` at any time to see exactly what's
-still missing — the bot refuses to publish a tournament until every
-required piece of configuration is present, and tells you precisely which
-ones.
+Run `/setup configure` as a server administrator. It's a two-page wizard:
+role selectors (admin/staff roles, premium role, participant role), the
+rules channel, the audit-log channel, and the tournament sign-up channel.
+That's it — there is no category selector. Every group and every knockout
+round gets its own Discord category, auto-created (and remembered) the
+first time it's needed; staff never link one manually. Run `/setup status`
+at any time to see exactly what's still missing — the bot refuses to
+publish a tournament until every required piece of configuration is
+present, and tells you precisely which ones.
 
 ## Creating a tournament
 
-`/tournament create name:<string> date:<YYYY-MM-DD> channel:<#channel>
-[entry_fee_pence:<int>]` — posts the persistent tournament announcement
-embed into the chosen channel. From there the flow is entirely
-button-driven for both managers and staff (see the Product Overview in
-[PLAN.md](./PLAN.md)).
+`/tournament create name:<string> date:<YYYY-MM-DD>
+[channel:<#channel>] [entry_fee_pence:<int>]` — posts the persistent
+tournament announcement embed. `channel` is optional; it defaults to the
+tournament channel set in `/setup`. **Only one cup runs at a time per
+server** — `/tournament create` refuses to start a second one while any
+non-finished tournament exists for the guild (`TournamentAlreadyActiveError`),
+rather than the multi-channel, multi-cup-per-week model an earlier draft of
+this bot assumed. From there the flow is entirely button-driven for both
+managers and staff (see the Product Overview in [PLAN.md](./PLAN.md)).
 
 ## Payment confirmation
 
@@ -258,39 +275,84 @@ buttons. Every action is logged to the audit-events table.
 Fully automatic once a tournament is created — `/tournament create`
 enqueues `PREMIUM_CUTOFF`, `SIGNUP_CLOSE`, and `GROUP_PUBLISH` jobs at their
 resolved schedule times. At kickoff, `GROUP_PUBLISH` builds the eligible
-(payment-confirmed) pool, runs the random draw, creates each group's role +
-`chat`/`results`/`staff` channels, assigns the group role to every manager/
-co-manager, generates the round-robin fixtures, and posts the fixtures
-graphic — all verified live against a real tournament and the real guild.
+(payment-confirmed) pool, runs the random draw, creates each group's own
+category + role + `chat`/`results`/`staff` channels, assigns the group role
+to every manager/co-manager, generates the round-robin fixtures, posts and
+pins the fixtures graphic in the chat channel, posts the results panel in
+the results channel, and enqueues a `FIXTURE_READY` job per fixture for its
+scheduled kickoff time — all verified live against a real tournament and
+the real guild.
 
 ## Testing the tournament flow — `/tournament test`
 
 `/tournament test [team_count] [cleanup]` (staff only) runs the entire
-group-publish pipeline immediately, against fake signups, instead of
-waiting for a real signup window and a real kickoff time. It creates
-`team_count` (default 8) fake clubs/entries — all payment-confirmed, all
-managed by whoever runs the command so real Discord role-assignment
-actually gets exercised — runs the exact same production pipeline
-`GROUP_PUBLISH` uses, verifies the result (right membership/fixture
-counts, every Discord resource actually created, the graphic actually
-posted), and replies with a phase-by-phase ✅/❌ report so you can see
-precisely where it broke if it did. By default (`cleanup:true`) it deletes
-every Discord role/channel and database row it created afterward; pass
+group-publish **and** knockout pipeline immediately, against fake signups
+and simulated results, instead of waiting for a real signup window, real
+submitted results, and a real kickoff time. `team_count` has no upper
+bound (default 8). It creates that many fake clubs/entries — all
+payment-confirmed, all managed by whoever runs the command so real Discord
+role-assignment actually gets exercised — runs the exact same production
+pipeline `GROUP_PUBLISH` uses, then fake-resolves every group fixture with
+a random score, runs the knockout draw, and keeps simulating results and
+advancing rounds until a champion is decided. It verifies every phase
+along the way (right membership/fixture counts, every Discord
+category/role/channel actually created for both groups and knockout
+rounds, every graphic actually posted, final tournament status COMPLETED)
+and replies with a phase-by-phase ✅/❌ report so you can see precisely
+where it broke if it did. By default (`cleanup:true`) it deletes every
+Discord category/role/channel and database row it created afterward; pass
 `cleanup:false` to leave everything in place for manual inspection — test
-channels are named `group-test-<id>-*` so they're easy to spot and remove
-by hand later. It's safe to run alongside a real live tournament: a random
-per-run prefix keeps its group codes (and therefore its Discord channel
-names) from ever colliding with a real tournament's "Group A", etc.
+resources are named with a `TEST-`/`TEST ` prefix so they're easy to spot
+and remove by hand later. It's safe to run alongside a real live
+tournament: that prefix keeps its group codes and round stage names (and
+therefore its Discord category/channel names) from ever colliding with a
+real tournament's "Group A", "Quarter Finals", etc. — and since only one
+real tournament ever runs at a time, the prefix doesn't need to be random
+to guarantee that.
 
-## Result submission, staff conflict resolution, knockout progression
+## Result submission, staff conflict resolution
 
-**Not yet implemented** — see [PLAN.md's "Known gaps"](./PLAN.md#known-gaps)
-section for the precise list. The domain logic these features need
-(standings, qualification, knockout draw, result normalization/validation)
-is fully built and tested; what's missing is the Discord-facing wiring —
-the `Submit Result` button/modal flow, knockout channel creation, and the
-remaining scheduler job handlers (confirmation reminders, result overdue
-reminders, prize deadline, midnight cleanup).
+Every fixture — group or knockout — gets a **results panel** posted to its
+results channel the moment the group/round is published: an embed listing
+every fixture with a live status, and a select menu of everything
+currently submittable. Once a fixture's scheduled kickoff time arrives
+(the `FIXTURE_READY` job walks it `SCHEDULED → READY →
+WAITING_FOR_SUBMISSIONS` automatically), picking it from the menu opens a
+score modal:
+
+- **Manager or co-manager** (whichever side they're on — detected
+  server-side, never trusted from the client): "Your score" / "Opponent's
+  score", plus optional penalty fields for knockout fixtures.
+- **Staff**: "Home score" / "Away score" directly — staff input is
+  authoritative and resolves the fixture immediately, no matching needed.
+
+A manager's submission is stored (their previous one, if any, is
+deactivated but kept for audit history, not deleted) and checked against
+whatever the opponent has on file. If the opponent hasn't submitted yet,
+the fixture waits. If both have submitted and they **match**, the fixture
+silently auto-resolves. If they **disagree**, the fixture flags
+`RESULT_CONFLICT` and a conflict panel posts to the staff channel showing
+both submissions side by side, with buttons to accept either one or
+manually override with a fresh score. The results panel refreshes in
+place (edited, never reposted) after every submission or resolution.
+
+Once every group fixture is resolved, the knockout pipeline (see
+"Testing the tournament flow" above) picks up automatically — there's no
+separate trigger to run.
+
+The domain logic behind all of this (standings, qualification, knockout
+draw, home/away result normalization, knockout-specific validation) was
+built and unit-tested earlier in this project; this is the Discord-facing
+wiring that finally calls it. Verified live against the real database and
+guild: a matching dual submission, a mismatched one, and a staff override
+all confirmed to resolve correctly. What couldn't be verified interactively
+is the actual button-click/modal-submit UI — there's no second Discord
+account available to click as a "user" distinct from staff (same
+limitation as the ticket system) — verification went through the same
+service functions the real Discord handlers call. See
+[PLAN.md's "Known gaps"](./PLAN.md#known-gaps) for what's still separately
+missing: confirmation/overdue reminders, prize-deadline and midnight-cleanup
+jobs, and an evidence/dispute system.
 
 ## Tickets
 
@@ -364,12 +426,27 @@ connection string.
 - [ ] `/payments` shows the new entry as `AWAITING_PAYMENT`; Confirm Payment
       moves it to `PAYMENT_CONFIRMED` and the announcement embed's
       paid-team count updates
-- [ ] At the tournament's group-publish time, groups actually appear: role +
-      3 channels per group, fixtures graphic posted, tournament status moves
-      to `GROUP_CONFIRMATION`
-- [ ] `/tournament test` (default options) reports all phases ✅ and cleans
-      up after itself — check the guild afterward to confirm no leftover
-      `group-test-*` channels/roles and no leftover `TEST RUN` tournament
+- [ ] At the tournament's group-publish time, groups actually appear: own
+      category + role + 3 channels per group, fixtures graphic posted and
+      pinned in the chat channel, a results panel posted in the results
+      channel, tournament status moves to `GROUP_CONFIRMATION`
+- [ ] At a fixture's scheduled kickoff time, it moves
+      `SCHEDULED → READY → WAITING_FOR_SUBMISSIONS` and appears in the
+      results panel's select menu
+- [ ] Picking a fixture from the results panel shows the right modal (Your
+      score/Opponent's score for a manager, Home/Away for staff); a
+      manager's first submission moves the fixture to
+      `WAITING_FOR_OPPONENT`; matching submissions from both sides
+      auto-resolve it; mismatched submissions move it to `RESULT_CONFLICT`
+      and post a conflict panel to the staff channel; the results panel
+      updates in place after each of these
+- [ ] The staff conflict panel's "Accept Submission 1/2" and "Manual
+      Override" buttons all resolve the fixture correctly
+- [ ] `/tournament test` (default options) reports all phases ✅ — including
+      the knockout pipeline phases, ending in a declared champion and
+      tournament status `COMPLETED` — and cleans up after itself; check the
+      guild afterward to confirm no leftover `TEST-*`/`TEST *`
+      categories/channels/roles and no leftover `TEST RUN` tournament
 - [ ] `/ticket-panel` posts the panel; clicking a ticket type creates a
       private channel; Claim and Close buttons both work
 - [ ] A member joining/leaving posts to the welcome channel (once the

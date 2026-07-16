@@ -2,14 +2,19 @@ import { ChannelType, SlashCommandBuilder, type ChatInputCommandInteraction } fr
 import type { AppContext } from '../../types/context.js';
 import { getOrCreateGuildConfig, checkGuildConfigStatus } from '../../database/repositories/guild-config-repository.js';
 import { isStaffMember } from '../permissions/staff.js';
-import { createTournament, updateTournamentAnnouncement, updateTournamentStatus } from '../../database/repositories/tournament-repository.js';
+import {
+  createTournament,
+  updateTournamentAnnouncement,
+  updateTournamentStatus,
+  getActiveTournamentForGuild,
+} from '../../database/repositories/tournament-repository.js';
 import { getEntriesByTournament } from '../../database/repositories/entry-repository.js';
 import { assertTournamentTransition } from '../../domain/tournaments/state-machine.js';
 import { buildAnnouncementEmbed, buildAnnouncementComponents } from '../embeds/tournament-announcement.js';
 import { DEFAULT_ENTRY_FEE_PENCE, DEFAULT_SCHEDULE } from '../../config/constants.js';
 import { recordAuditEvent, newCorrelationId } from '../../domain/audit/audit-log.js';
 import { resolveSchedule } from '../../domain/tournaments/schedule.js';
-import { MissingConfigurationError, PermissionError, ValidationError } from '../../types/errors.js';
+import { MissingConfigurationError, PermissionError, TournamentAlreadyActiveError, ValidationError } from '../../types/errors.js';
 import { DateTime } from 'luxon';
 import type { PrizeConfiguration } from '../../database/schema/tournaments.js';
 import { addTournamentTestSubcommand, executeTournamentTest } from './tournament-test.js';
@@ -20,7 +25,7 @@ export const tournamentCommand = new SlashCommandBuilder()
   .addSubcommand((sub) =>
     sub
       .setName('create')
-      .setDescription('Create and publish a new cash-cup tournament')
+      .setDescription('Create and publish a new cash-cup tournament (only one runs at a time)')
       .addStringOption((opt) => opt.setName('name').setDescription('Tournament name').setRequired(true))
       .addStringOption((opt) =>
         opt.setName('date').setDescription('Tournament date (YYYY-MM-DD, in the server timezone)').setRequired(true),
@@ -28,7 +33,7 @@ export const tournamentCommand = new SlashCommandBuilder()
       .addChannelOption((opt) =>
         opt
           .setName('channel')
-          .setDescription('Channel to post the announcement in (defaults to weekday channel if configured)')
+          .setDescription('Channel to post the announcement in (defaults to the configured tournament channel)')
           .addChannelTypes(ChannelType.GuildText)
           .setRequired(false),
       )
@@ -62,6 +67,11 @@ export async function executeTournamentCommand(interaction: ChatInputCommandInte
     throw new MissingConfigurationError(status.missing);
   }
 
+  const activeTournament = await getActiveTournamentForGuild(ctx.db, interaction.guildId);
+  if (activeTournament) {
+    throw new TournamentAlreadyActiveError(activeTournament.name);
+  }
+
   const name = interaction.options.getString('name', true);
   const dateISO = interaction.options.getString('date', true);
   const explicitChannel = interaction.options.getChannel('channel');
@@ -71,15 +81,9 @@ export async function executeTournamentCommand(interaction: ChatInputCommandInte
     throw new ValidationError('Date must be in YYYY-MM-DD format.');
   }
 
-  let channelId = explicitChannel?.id;
+  const channelId = explicitChannel?.id ?? config.tournamentChannelId;
   if (!channelId) {
-    const weekday = DateTime.fromISO(dateISO, { zone: config.timezone }).toFormat('cccc').toLowerCase();
-    channelId = config.tournamentChannels[weekday];
-  }
-  if (!channelId) {
-    throw new ValidationError(
-      'No channel specified and no weekday channel configured for that date. Pass a channel or run /setup configure.',
-    );
+    throw new ValidationError('No channel specified and no tournament channel configured. Pass a channel or run /setup configure.');
   }
 
   await interaction.deferReply({ ephemeral: true });

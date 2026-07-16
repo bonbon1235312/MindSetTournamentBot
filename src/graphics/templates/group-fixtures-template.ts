@@ -1,5 +1,5 @@
 import { GRAPHIC_DIMENSIONS } from '../../config/constants.js';
-import { BRAND, FONT_STACK, svgBackground, svgDocument, svgFooter } from '../svg/base.js';
+import { BRAND, FONT_STACK, svgBackground, svgDocument, svgFooter, svgLogo } from '../svg/base.js';
 import { truncateAndEscape, escapeXml } from '../svg/escape.js';
 
 export interface GroupFixtureMatch {
@@ -29,22 +29,23 @@ const { width: W, height: H } = GRAPHIC_DIMENSIONS;
  * caller (renderers/group-fixtures-renderer.ts) rasterises it via Sharp.
  */
 export function renderGroupFixturesSvg(input: GroupFixturesGraphicInput): string {
-  const headerHeight = 210;
+  const headerHeight = 250;
   const footerHeight = 70;
   const roundsAreaTop = headerHeight + 20;
   const roundsAreaHeight = H - headerHeight - footerHeight - 30;
   const roundHeight = roundsAreaHeight / input.rounds.length;
 
   const header = `
-    <text x="${W / 2}" y="70" text-anchor="middle" font-family="${FONT_STACK}"
-      font-size="26" font-weight="600" letter-spacing="4" fill="${BRAND.accent}">
+    ${svgLogo(W / 2, 66, 72)}
+    <text x="${W / 2}" y="130" text-anchor="middle" font-family="${FONT_STACK}"
+      font-size="24" font-weight="600" letter-spacing="4" fill="${BRAND.muted}">
       ${truncateAndEscape(input.tournamentName.toUpperCase(), 40)}
     </text>
-    <text x="${W / 2}" y="165" text-anchor="middle" font-family="${FONT_STACK}"
-      font-size="96" font-weight="800" fill="${BRAND.text}">
+    <text x="${W / 2}" y="205" text-anchor="middle" font-family="${FONT_STACK}"
+      font-size="88" font-weight="800" fill="${BRAND.text}">
       GROUP ${escapeXml(input.groupCode)}
     </text>
-    <line x1="90" y1="${headerHeight - 10}" x2="${W - 90}" y2="${headerHeight - 10}" stroke="${BRAND.accent}" stroke-width="2" opacity="0.5" />
+    <line x1="90" y1="${headerHeight - 10}" x2="${W - 90}" y2="${headerHeight - 10}" stroke="${BRAND.accent}" stroke-width="2" opacity="0.4" />
   `;
 
   const roundsSvg = input.rounds
@@ -84,7 +85,7 @@ function renderMatch(match: GroupFixtureMatch, top: number, height: number): str
 
   return `
     <rect x="90" y="${cardTop}" width="${W - 180}" height="${cardHeight}" rx="14"
-      fill="#0F2744" fill-opacity="0.65" stroke="${BRAND.accent}" stroke-opacity="0.25" stroke-width="1.5" />
+      fill="${BRAND.cardFill}" stroke="${BRAND.cardStroke}" stroke-width="1.5" />
     <text x="130" y="${centerY + 8}" font-family="${FONT_STACK}" font-size="30" font-weight="700"
       fill="${BRAND.text}">${homeName}</text>
     <text x="${W / 2}" y="${centerY + 8}" text-anchor="middle" font-family="${FONT_STACK}" font-size="24"

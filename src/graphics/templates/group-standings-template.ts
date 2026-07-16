@@ -1,5 +1,5 @@
 import { GRAPHIC_DIMENSIONS } from '../../config/constants.js';
-import { BRAND, FONT_STACK, svgBackground, svgDocument, svgFooter } from '../svg/base.js';
+import { BRAND, FONT_STACK, svgBackground, svgDocument, svgFooter, svgLogo } from '../svg/base.js';
 import { truncateAndEscape } from '../svg/escape.js';
 import { escapeXml } from '../svg/escape.js';
 
@@ -40,18 +40,19 @@ const COLUMNS = [
 ];
 
 export function renderGroupStandingsSvg(input: GroupStandingsGraphicInput): string {
-  const headerHeight = 210;
+  const headerHeight = 250;
   const footerHeight = 70;
   const tableTop = headerHeight + 30;
   const rowHeight = (H - headerHeight - footerHeight - 90) / Math.max(input.standings.length, 1);
 
   const header = `
-    <text x="${W / 2}" y="70" text-anchor="middle" font-family="${FONT_STACK}"
-      font-size="26" font-weight="600" letter-spacing="4" fill="${BRAND.accent}">
+    ${svgLogo(W / 2, 66, 72)}
+    <text x="${W / 2}" y="130" text-anchor="middle" font-family="${FONT_STACK}"
+      font-size="24" font-weight="600" letter-spacing="4" fill="${BRAND.muted}">
       ${truncateAndEscape(input.tournamentName.toUpperCase(), 40)}
     </text>
-    <text x="${W / 2}" y="165" text-anchor="middle" font-family="${FONT_STACK}"
-      font-size="82" font-weight="800" fill="${BRAND.text}">
+    <text x="${W / 2}" y="200" text-anchor="middle" font-family="${FONT_STACK}"
+      font-size="70" font-weight="800" fill="${BRAND.text}">
       GROUP ${escapeXml(input.groupCode)} · STANDINGS
     </text>
   `;
@@ -78,13 +79,13 @@ export function renderGroupStandingsSvg(input: GroupStandingsGraphicInput): stri
 
 function renderStandingsRow(row: GroupStandingsRow, index: number, top: number, height: number, qualifies: boolean): string {
   const centerY = top + height / 2 + 8;
-  const rowFill = qualifies ? '#0F2744' : '#081426';
+  const rowFill = qualifies ? BRAND.cardFillHighlight : BRAND.cardFill;
   const teamName = truncateAndEscape(row.teamName, 22);
   const gdText = row.goalDifference > 0 ? `+${row.goalDifference}` : String(row.goalDifference);
 
   return `
     <rect x="90" y="${top}" width="${W - 180}" height="${height - 10}" rx="10"
-      fill="${rowFill}" fill-opacity="0.7" stroke="${BRAND.accent}" stroke-opacity="${qualifies ? 0.4 : 0.12}" stroke-width="1.5" />
+      fill="${rowFill}" stroke="${BRAND.cardStroke}" stroke-opacity="${qualifies ? 0.9 : 0.4}" stroke-width="1.5" />
     <text x="130" y="${centerY}" font-family="${FONT_STACK}" font-size="26" font-weight="800" fill="${BRAND.accent}">${index + 1}</text>
     <text x="175" y="${centerY}" font-family="${FONT_STACK}" font-size="26" font-weight="700" fill="${BRAND.text}">${teamName}</text>
     <text x="620" y="${centerY}" text-anchor="middle" font-family="${FONT_STACK}" font-size="24" fill="${BRAND.text}" opacity="0.9">${row.played}</text>
