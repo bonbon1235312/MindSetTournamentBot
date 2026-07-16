@@ -52,3 +52,22 @@ export const DEFAULT_BRANDING = {
   dangerColor: '#C0392B',
   textColor: '#FFFFFF',
 } as const;
+
+/** Ticket system config (deliberately code-level, not DB/setup-driven —
+ * the whole point is "no setup"). Add an entry here to add a new ticket
+ * type; nothing else needs to change. */
+export const TICKET_TYPES = [
+  { id: 'support', label: 'General Support', emoji: '🎫', description: 'Questions or general help' },
+  { id: 'payment', label: 'Payment Issue', emoji: '💳', description: 'Entry fee or prize payment problems' },
+  { id: 'dispute', label: 'Report a Dispute', emoji: '⚠️', description: 'Match result or rule dispute' },
+  { id: 'other', label: 'Other', emoji: '❓', description: 'Anything else' },
+] as const;
+
+export type TicketTypeId = (typeof TICKET_TYPES)[number]['id'];
+
+export const TICKET_CATEGORY_NAME = 'Support Tickets';
+/** Channel name fragment (case-insensitive) auto-detected for welcome and
+ * goodbye messages — see discord/listeners/member-events.ts. No dedicated
+ * "goodbye" channel is assumed to exist; leave events post to the same
+ * channel as joins. */
+export const WELCOME_CHANNEL_NAME_FRAGMENT = 'welcome';

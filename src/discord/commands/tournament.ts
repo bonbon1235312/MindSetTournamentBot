@@ -129,6 +129,24 @@ export async function executeTournamentCommand(interaction: ChatInputCommandInte
 
   await updateTournamentAnnouncement(ctx.db, live.id, channel.id, message.id);
 
+  // Section 32: the tournament clock is entirely scheduler-driven — nothing
+  // fires automatically unless enqueued here. SIGNUP_CLOSE and GROUP_PUBLISH
+  // share the same default run time; both handlers are written to tolerate
+  // running in either order (see their own idempotency guards).
+  for (const [jobType, runAt] of [
+    ['PREMIUM_CUTOFF', schedule.premiumCutoff],
+    ['SIGNUP_CLOSE', schedule.signupClose],
+    ['GROUP_PUBLISH', schedule.groupPublish],
+  ] as const) {
+    await ctx.scheduler.enqueue({
+      tournamentId: live.id,
+      jobType,
+      runAt: runAt.toJSDate(),
+      idempotencyKey: `${jobType}:${live.id}`,
+      payload: {},
+    });
+  }
+
   await interaction.followUp({
     content: `✅ Tournament **${name}** created and published in <#${channel.id}>.`,
     ephemeral: true,

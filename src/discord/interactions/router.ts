@@ -23,6 +23,7 @@ import {
   handleCoManagerChangeSelect,
   handleAdminButton,
 } from '../components/announcement-actions.js';
+import { handleOpenTicketButton, handleClaimTicketButton, handleCloseTicketButton } from '../components/ticket-flow.js';
 
 /**
  * Single entry point for every Discord interaction. This is the "global
@@ -88,6 +89,15 @@ export async function routeInteraction(interaction: Interaction, ctx: AppContext
           else if (action === 'pullout_confirm') await handlePullOutConfirm(interaction, ctx, tournamentId);
           else if (action === 'comanager') await handleCoManagerManageButton(interaction, ctx, tournamentId);
           else if (action === 'admin') await handleAdminButton(interaction, ctx, tournamentId);
+          return;
+        }
+
+        case 'ticket': {
+          if (!interaction.isButton()) return;
+          const ticketOrTypeId = parts[0]!;
+          if (action === 'open') await handleOpenTicketButton(interaction, ctx, ticketOrTypeId);
+          else if (action === 'claim') await handleClaimTicketButton(interaction, ctx, ticketOrTypeId);
+          else if (action === 'close') await handleCloseTicketButton(interaction, ctx, ticketOrTypeId);
           return;
         }
 

@@ -4,6 +4,8 @@ import { createLogger } from '../utils/logger.js';
 import { createDatabase } from '../database/client.js';
 import { createDiscordClient } from '../discord/client.js';
 import { routeInteraction } from '../discord/interactions/router.js';
+import { registerMemberEventListeners } from '../discord/listeners/member-events.js';
+import { registerJobHandlers } from '../workers/job-handlers/index.js';
 import { SchedulerService } from '../services/scheduler-service.js';
 import type { AppContext } from '../types/context.js';
 
@@ -20,6 +22,7 @@ export async function bootstrap(): Promise<AppContext> {
   const scheduler = new SchedulerService(db, logger.child({ component: 'scheduler' }), env.SCHEDULER_WORKER_ID);
 
   const ctx: AppContext = { client, db, env, logger, scheduler };
+  registerJobHandlers(ctx);
 
   client.once(Events.ClientReady, (readyClient) => {
     logger.info({ tag: readyClient.user.tag, id: readyClient.user.id }, 'Discord client ready.');
@@ -28,6 +31,8 @@ export async function bootstrap(): Promise<AppContext> {
   client.on(Events.InteractionCreate, (interaction) => {
     void routeInteraction(interaction, ctx);
   });
+
+  registerMemberEventListeners(client, ctx);
 
   client.on(Events.Error, (error) => {
     logger.error({ error }, 'Discord client error');

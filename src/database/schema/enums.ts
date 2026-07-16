@@ -141,6 +141,11 @@ export const knockoutRoundStatusEnum = pgEnum('knockout_round_status', [
 /** Section 9 — external payment rail; the bot never touches money itself. */
 export const paymentMethodEnum = pgEnum('payment_method', ['PAYPAL', 'REVOLUT']);
 
+/** Support ticket lifecycle — deliberately just two states; there's no
+ * "claimed" status because claiming is a marker on an OPEN ticket, not a
+ * separate stage (a claimed ticket can still be closed directly). */
+export const ticketStatusEnum = pgEnum('ticket_status', ['OPEN', 'CLOSED']);
+
 // ── Convenience type aliases (avoid `(typeof xEnum.enumValues)[number]` at every call site) ──
 export type TournamentStatus = (typeof tournamentStatusEnum.enumValues)[number];
 export type EntryStatus = (typeof entryStatusEnum.enumValues)[number];

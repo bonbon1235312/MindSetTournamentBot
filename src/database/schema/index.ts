@@ -16,3 +16,4 @@ export * from './member-nickname-snapshots.js';
 export * from './scheduled-jobs.js';
 export * from './audit-events.js';
 export * from './graphics.js';
+export * from './tickets.js';

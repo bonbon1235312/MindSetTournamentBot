@@ -4,14 +4,19 @@ A production Discord bot that automates FC Clubs cash-cup tournaments —
 signup, manual payment tracking, random group draws, round-robin
 scheduling, dual-sided result submission, qualification, and knockout
 progression, all driven by buttons, modals, and dropdowns rather than slash
-commands for normal users.
+commands for normal users. Also includes a self-provisioning support
+ticket system and welcome/goodbye messages.
 
 > **Current status:** the foundation (schema, domain logic, scheduler
 > engine, graphics pipeline, signup/payment Discord flow) is built and
-> verified. The tournament-clock automation (group generation actually
-> firing at kickoff, result submission UI, knockout bracket) is **not yet
-> wired up** — see [PLAN.md](./PLAN.md#known-gaps) for the exact list before
-> relying on this in production.
+> verified. The tournament clock now actually fires: signups close and
+> groups get generated — Discord roles/channels created, fixtures
+> scheduled, graphics posted — automatically at kickoff, verified live.
+> Result submission and knockout progression are **not yet wired up** — see
+> [PLAN.md](./PLAN.md#known-gaps) for the exact list before relying on this
+> in production. Welcome/goodbye messages are built but **blocked**: they
+> need the GuildMembers privileged intent enabled in the Discord Developer
+> Portal (Bot tab → Server Members Intent) — see below.
 
 ## Feature list
 
@@ -46,7 +51,15 @@ commands for normal users.
   re-renders
 - Database-backed job scheduler (`FOR UPDATE SKIP LOCKED` row-locking, so
   multiple bot processes can never double-claim a job), with retry backoff,
-  dead-lettering, and crash-lease reconciliation on startup
+  dead-lettering, and crash-lease reconciliation on startup — and the
+  tournament clock is actually wired to it: signup close and group
+  publication fire automatically, verified live end-to-end
+- Self-provisioning support ticket system — one staff command posts a panel
+  with a button per ticket type; opening a ticket auto-creates a private
+  channel (and the shared category, first time) with zero configuration
+- Welcome/goodbye messages, auto-detecting the welcome channel by name so
+  no setup is required (blocked on a Developer Portal intent toggle — see
+  "Current status" above)
 - Zod-validated environment configuration, Pino structured logging,
   Postgres via Drizzle ORM with committed SQL migrations
 
@@ -75,13 +88,16 @@ Prettier.
 2. **Bot** tab → **Reset Token**, copy it → this is `DISCORD_TOKEN`.
 3. **General Information** tab → copy the **Application ID** → this is
    `DISCORD_CLIENT_ID`.
-4. **Bot** tab → leave **Message Content Intent** and **Server Members
-   Intent** both **OFF**. This bot deliberately requests neither — every
-   user-facing flow is button/modal-driven (no message parsing needed) and
-   every member lookup is a targeted REST fetch (no bulk member list
-   needed). Turning these on is unnecessary and the gateway will reject the
-   connection if you request an intent in code without also enabling it
-   here — this project's `discord/intents.ts` requests only `Guilds`.
+4. **Bot** tab → leave **Message Content Intent** OFF (every user-facing
+   flow is button/modal-driven, nothing parses message text). **Turn
+   Server Members Intent ON** — the welcome/goodbye feature needs the
+   `GuildMemberAdd`/`GuildMemberRemove` gateway events, which this
+   privileged intent gates. `discord/intents.ts` requests
+   `Guilds` + `GuildMembers`; if this toggle is off, the gateway will
+   reject the connection outright with "Used disallowed intents" — verified
+   live. If you don't want welcome/goodbye, you can remove
+   `GatewayIntentBits.GuildMembers` from `REQUIRED_INTENTS` instead of
+   enabling the portal toggle; nothing else in the bot needs it.
 5. **OAuth2 → URL Generator**: scopes `bot` + `applications.commands`.
 
 ### Required bot permissions
@@ -169,10 +185,10 @@ This project is built for the **"Discord - TypeScript"** loader:
 4. Before first start (or after any schema change), run `npm run db:migrate`
    once via the panel's console.
 5. Run `npm run commands:deploy` once after every deploy where slash
-   commands changed (`/setup`, `/tournament`, `/payments` currently). Set
-   `COMMAND_DEPLOY_MODE=global` for production once you're past active
-   development — global propagation can take up to an hour, `guild` mode is
-   instant but only registers to `DISCORD_GUILD_ID`.
+   commands changed (`/setup`, `/tournament`, `/payments`, `/ticket-panel`
+   currently). Set `COMMAND_DEPLOY_MODE=global` for production once you're
+   past active development — global propagation can take up to an hour,
+   `guild` mode is instant but only registers to `DISCORD_GUILD_ID`.
 
 ## Slash-command deployment
 
@@ -180,7 +196,7 @@ This project is built for the **"Discord - TypeScript"** loader:
 npm run commands:deploy
 ```
 
-Deploys `/setup`, `/tournament`, `/payments`. Controlled by
+Deploys `/setup`, `/tournament`, `/payments`, `/ticket-panel`. Controlled by
 `COMMAND_DEPLOY_MODE` (`guild` | `global`) and, for guild mode,
 `DISCORD_GUILD_ID`.
 
@@ -209,15 +225,43 @@ button-driven for both managers and staff (see the Product Overview in
 a team from a searchable list, and use Confirm/Undo/Reject/Refund-tracking
 buttons. Every action is logged to the audit-events table.
 
-## Running groups, result submission, staff conflict resolution, knockout progression
+## Running groups
+
+Fully automatic once a tournament is created — `/tournament create`
+enqueues `PREMIUM_CUTOFF`, `SIGNUP_CLOSE`, and `GROUP_PUBLISH` jobs at their
+resolved schedule times. At kickoff, `GROUP_PUBLISH` builds the eligible
+(payment-confirmed) pool, runs the random draw, creates each group's role +
+`chat`/`results`/`staff` channels, assigns the group role to every manager/
+co-manager, generates the round-robin fixtures, and posts the fixtures
+graphic — all verified live against a real tournament and the real guild.
+
+## Result submission, staff conflict resolution, knockout progression
 
 **Not yet implemented** — see [PLAN.md's "Known gaps"](./PLAN.md#known-gaps)
 section for the precise list. The domain logic these features need
-(group generation, round-robin scheduling, standings, qualification,
-knockout draw, result normalization/validation) is fully built and tested;
-what's missing is the Discord-facing wiring (channel/role creation, the
-result-submission button/modal flow, and the scheduler job handlers that
-would trigger group publication automatically at kickoff).
+(standings, qualification, knockout draw, result normalization/validation)
+is fully built and tested; what's missing is the Discord-facing wiring —
+the `Submit Result` button/modal flow, knockout channel creation, and the
+remaining scheduler job handlers (confirmation reminders, result overdue
+reminders, prize deadline, midnight cleanup).
+
+## Tickets
+
+Staff run `/ticket-panel` once, anywhere, to post the panel — no other
+setup. A member clicks a ticket-type button; the bot creates (or reuses)
+a "Support Tickets" category and a private channel just for them, visible
+only to them and staff. `Claim Ticket` marks who's handling it; `Close
+Ticket` (available to the opener or staff) closes it out and deletes the
+channel a few seconds later. Add a new ticket type by adding one entry to
+`TICKET_TYPES` in `src/config/constants.ts` — nothing else needs to change.
+
+## Welcome / goodbye
+
+No setup — both events look for a text channel whose name contains
+"welcome" and post there. **Requires the GuildMembers privileged intent**
+to be enabled in the Developer Portal (see above); until then the bot
+cannot connect to Discord at all if `GatewayIntentBits.GuildMembers` stays
+in `REQUIRED_INTENTS`.
 
 ## Cleanup / Repair system
 
@@ -256,19 +300,29 @@ connection string.
 ## Manual testing checklist
 
 - [ ] `npm install && npm run build && npm start` completes with no errors
-      and the bot logs "Discord client ready."
+      and the bot logs "Discord client ready." (requires the GuildMembers
+      intent to be enabled in the portal — see above — or the connection
+      will fail with "Used disallowed intents")
 - [ ] `npm run db:migrate` applies cleanly against a fresh database
 - [ ] `npm run commands:deploy` registers `/setup`, `/tournament`,
-      `/payments` and they appear in Discord
+      `/payments`, `/ticket-panel` and they appear in Discord
 - [ ] `/setup status` correctly lists missing configuration on a fresh
       guild, and shows nothing missing after `/setup configure` completes
 - [ ] `/tournament create` posts the announcement embed with correct
-      branding, schedule times, and a working Sign Up button
+      branding, schedule times, and a working Sign Up button, and enqueues
+      its three scheduler jobs
 - [ ] Clicking Sign Up: team name modal → co-manager select → rules
       acceptance → entry created, manager/co-manager nicknamed correctly,
       ephemeral confirmation shown
 - [ ] `/payments` shows the new entry as `AWAITING_PAYMENT`; Confirm Payment
       moves it to `PAYMENT_CONFIRMED` and the announcement embed's
       paid-team count updates
+- [ ] At the tournament's group-publish time, groups actually appear: role +
+      3 channels per group, fixtures graphic posted, tournament status moves
+      to `GROUP_CONFIRMATION`
+- [ ] `/ticket-panel` posts the panel; clicking a ticket type creates a
+      private channel; Claim and Close buttons both work
+- [ ] A member joining/leaving posts to the welcome channel (once the
+      GuildMembers intent is enabled)
 - [ ] `npm test` passes all 144 tests
 - [ ] `npm run typecheck` and `npm run lint` are both clean

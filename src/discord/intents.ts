@@ -7,14 +7,13 @@ import { GatewayIntentBits } from 'discord.js';
  * reaction — so we deliberately do NOT need the privileged Message Content
  * or GuildMessageReactions intents.
  *
- * We also do NOT request the privileged GuildMembers intent: every member
- * lookup in this codebase is a targeted REST fetch (`guild.members.fetch(
- * userId)`), which works regardless of that gateway intent — it only gates
- * bulk member lists and MEMBER_ADD/UPDATE/REMOVE gateway events, neither of
- * which this bot uses. Requesting it anyway would force staff to flip on
- * "Server Members Intent" in the Discord Developer Portal for no benefit,
- * and the gateway hard-rejects the connection ("Used disallowed intents")
- * if it's requested but not enabled there — verified live against the real
- * bot before settling on this intent set.
+ * GuildMembers IS requested (as of the welcome/goodbye feature) purely to
+ * receive the GuildMemberAdd/GuildMemberRemove gateway events those
+ * listeners need — every other member lookup in this codebase is still a
+ * targeted REST fetch that doesn't need this intent. This is a privileged
+ * intent: "Server Members Intent" must be enabled for this application in
+ * the Discord Developer Portal (Bot tab), or the gateway will hard-reject
+ * the connection ("Used disallowed intents") — verified live against the
+ * real bot after enabling it there.
  */
-export const REQUIRED_INTENTS = [GatewayIntentBits.Guilds];
+export const REQUIRED_INTENTS = [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers];
