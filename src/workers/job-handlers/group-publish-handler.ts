@@ -1,4 +1,4 @@
-import type { ScheduledJob } from '../../database/schema/index.js';
+import type { ScheduledJob, Tournament, Group } from '../../database/schema/index.js';
 import type { AppContext } from '../../types/context.js';
 import { getTournamentById } from '../../database/repositories/tournament-repository.js';
 import { getEntriesByTournament, updateEntryStatus } from '../../database/repositories/entry-repository.js';
@@ -19,29 +19,42 @@ import { DateTime } from 'luxon';
 
 const ENTRY_STATUSES_EXCLUDED_FROM_ELIGIBILITY = ['WITHDRAWN', 'KICKED', 'DISQUALIFIED'] as const;
 
+export interface GroupPublishResult {
+  groups: Group[];
+  reserveCount: number;
+  eligibleCount: number;
+  seed: number;
+}
+
+export interface GroupPublishOptions {
+  /** Prepended to every group code before it's used for the Discord role
+   * and channel names (e.g. "group-a-chat" -> "group-diaga-chat"). ensure
+   * GroupResources resolves Discord channels by exact name match with no
+   * awareness of *which* tournament they belong to — without a prefix, a
+   * second tournament that also lands on "Group A" (e.g. a diagnostic test
+   * run while a real tournament is live) would silently find and reuse the
+   * OTHER tournament's real channels. Production calls (via the scheduled
+   * job) leave this unset; /tournament test always sets a unique one. */
+  groupCodePrefix?: string;
+}
+
 /**
  * Section 11's core pipeline: build the eligible pool, randomly draw exact
  * groups of 4 (+ reserves), persist everything, stand up each group's
  * Discord role/channels (section 12), generate its round-robin fixtures
- * (section 13), and post its fixture graphic (section 14). This is the
- * single highest-priority job handler — it's the one that makes the
- * tournament clock actually do something instead of just ticking.
+ * (section 13), and post its fixture graphic (section 14).
+ *
+ * Extracted from the job handler so /tournament test can run the exact
+ * same production code path synchronously (see job-handlers/index.ts vs.
+ * discord/commands/tournament-test.ts) instead of duplicating it.
  */
-export async function handleGroupPublish(job: ScheduledJob, ctx: AppContext): Promise<void> {
-  const tournamentId = job.tournamentId;
-  if (!tournamentId) throw new Error('GROUP_PUBLISH job is missing tournamentId');
-
-  const tournament = await getTournamentById(ctx.db, tournamentId);
-  if (!tournament) throw new Error(`Tournament ${tournamentId} not found`);
-
-  if (isAtOrPastStatus(tournament.status, 'GROUP_CONFIRMATION')) {
-    ctx.logger.info({ tournamentId, status: tournament.status }, 'Groups already published for this tournament — skipping (idempotent)');
-    return;
-  }
-  if (tournament.paused) {
-    ctx.logger.warn({ tournamentId }, 'Tournament is paused — skipping group publish for now');
-    return;
-  }
+export async function runGroupPublishPipeline(
+  ctx: AppContext,
+  tournament: Tournament,
+  options: GroupPublishOptions = {},
+): Promise<GroupPublishResult> {
+  const tournamentId = tournament.id;
+  const groupCodePrefix = options.groupCodePrefix ?? '';
 
   const guild = await ctx.client.guilds.fetch(tournament.guildId);
   const config = await getOrCreateGuildConfig(ctx.db, tournament.guildId);
@@ -49,7 +62,7 @@ export async function handleGroupPublish(job: ScheduledJob, ctx: AppContext): Pr
     throw new Error(`Guild ${tournament.guildId} is missing group/staff category configuration — run /setup configure`);
   }
 
-  let current = await advanceTournamentTo(ctx.db, tournament, 'GENERATING_GROUPS');
+  const current = await advanceTournamentTo(ctx.db, tournament, 'GENERATING_GROUPS');
 
   const allEntries = await getEntriesByTournament(ctx.db, tournamentId);
   const eligible = allEntries.filter(
@@ -92,9 +105,10 @@ export async function handleGroupPublish(job: ScheduledJob, ctx: AppContext): Pr
   }
 
   const schedule = resolveSchedule(tournament.date, tournament.schedule as TemplateSchedule, config.timezone);
+  const createdGroups: Group[] = [];
 
   for (const [groupIndex, groupDraw] of draw.groups.entries()) {
-    const groupCode = groupCodeForIndex(groupIndex);
+    const groupCode = `${groupCodePrefix}${groupCodeForIndex(groupIndex)}`;
     const group = await createGroup(ctx.db, { tournamentId, groupCode });
 
     for (const [slotIndex, member] of groupDraw.entries.entries()) {
@@ -104,7 +118,12 @@ export async function handleGroupPublish(job: ScheduledJob, ctx: AppContext): Pr
     }
 
     const resources = await ensureGroupResources(guild, group, config, ctx.logger);
-    await updateGroupResources(ctx.db, group.id, {
+    // Track the group's up-to-date row as each update lands, rather than
+    // returning the stale pre-resource-attachment object created above —
+    // callers (e.g. /tournament test's verification phase, and its
+    // cleanup, which reads chatChannelId etc off this exact return value)
+    // need the real IDs, not nulls.
+    let currentGroup = await updateGroupResources(ctx.db, group.id, {
       roleId: resources.role.id,
       chatChannelId: resources.chatChannel.id,
       resultsChannelId: resources.resultsChannel.id,
@@ -153,7 +172,8 @@ export async function handleGroupPublish(job: ScheduledJob, ctx: AppContext): Pr
       ctx.env.GRAPHICS_CACHE_DIR,
     );
     const message = await resources.resultsChannel.send({ files: [{ attachment: graphic.buffer, name: 'group-fixtures.png' }] });
-    await updateGroupResources(ctx.db, group.id, { graphicMessageId: message.id });
+    currentGroup = await updateGroupResources(ctx.db, group.id, { graphicMessageId: message.id });
+    createdGroups.push(currentGroup);
 
     await recordAuditEvent(ctx.db, ctx.logger, {
       guildId: tournament.guildId,
@@ -170,4 +190,30 @@ export async function handleGroupPublish(job: ScheduledJob, ctx: AppContext): Pr
   await advanceTournamentTo(ctx.db, current, 'GROUP_CONFIRMATION');
 
   ctx.logger.info({ tournamentId, groups: draw.groups.length, reserves: draw.reserves.length }, 'Group publish complete');
+
+  return {
+    groups: createdGroups,
+    reserveCount: draw.reserves.length,
+    eligibleCount: eligible.length,
+    seed: draw.seed,
+  };
+}
+
+export async function handleGroupPublish(job: ScheduledJob, ctx: AppContext): Promise<void> {
+  const tournamentId = job.tournamentId;
+  if (!tournamentId) throw new Error('GROUP_PUBLISH job is missing tournamentId');
+
+  const tournament = await getTournamentById(ctx.db, tournamentId);
+  if (!tournament) throw new Error(`Tournament ${tournamentId} not found`);
+
+  if (isAtOrPastStatus(tournament.status, 'GROUP_CONFIRMATION')) {
+    ctx.logger.info({ tournamentId, status: tournament.status }, 'Groups already published for this tournament — skipping (idempotent)');
+    return;
+  }
+  if (tournament.paused) {
+    ctx.logger.warn({ tournamentId }, 'Tournament is paused — skipping group publish for now');
+    return;
+  }
+
+  await runGroupPublishPipeline(ctx, tournament);
 }

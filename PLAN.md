@@ -136,6 +136,40 @@ message / the tournament status correctly landing on `GROUP_CONFIRMATION`,
 then deleted every Discord resource and database row the test created and
 confirmed zero residue.
 
+## `/tournament test` — staff diagnostic command
+
+The pipeline above was extracted into `runGroupPublishPipeline()` (options:
+`{ groupCodePrefix }`) specifically so `discord/commands/tournament-test.ts`
+could call the *exact* production code path synchronously instead of
+duplicating it. `groupCodePrefix` exists because `ensureGroupResources`
+resolves Discord channels by literal name — without a unique prefix per
+test run, a test could silently find and reuse (and post fake fixtures
+into) a **real** live tournament's actual "Group A" channels. Every test
+run gets a random `test-<8-hex>-` prefix.
+
+Creates N fake clubs/entries (`team_count`, default 8, using the staff
+member running the command as manager on all of them so real Discord role-
+assignment is genuinely exercised, not just its failure path), runs the
+pipeline, verifies membership/fixture counts and that every Discord
+resource + the graphic actually got created, and reports each phase
+✅/❌ with the real error message on failure. Defaults to deleting
+everything it created afterward (`cleanup:false` to leave it for manual
+inspection instead).
+
+**A real bug was caught by testing this against the live guild, not just
+typechecking it**: the first implementation returned each group's
+*pre-resource-attachment* database row from the pipeline (captured right
+after `createGroup()`, before the later `updateGroupResources()` calls
+that attach `roleId`/`chatChannelId`/etc.). That meant the verification
+phase would always report groups as "missing a Discord role or channel"
+even when they weren't, and cleanup would silently skip deleting the real
+Discord role and channels it had created — leaking them into the guild
+every run. Fixed by threading the updated row through instead of the
+stale one; re-ran the same live test (including a decoy channel planted
+in advance to prove the group-code-prefix collision guard actually works)
+and confirmed the fix, then swept the whole guild and database for any
+residue from the earlier buggy run and confirmed none was left.
+
 ## Domain logic (pure functions, fully unit-tested)
 
 | Module | Responsibility |
@@ -197,6 +231,7 @@ built — see "Known gaps."
 | 11. Welcome / goodbye | 🟡 Built, blocked on the GuildMembers portal toggle (see above) |
 | 12. Ticket system | ✅ Done, verified against real DB + command deployment |
 | 13. Scheduler job handlers (PREMIUM_CUTOFF, SIGNUP_CLOSE, GROUP_PUBLISH) | ✅ Done, verified live end-to-end including real Discord resource creation |
+| 14. `/tournament test` diagnostic command | ✅ Done, verified live — caught and fixed a real bug in the pipeline it exercises |
 
 ## Known gaps (honest, not glossed over)
 

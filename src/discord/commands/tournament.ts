@@ -12,6 +12,7 @@ import { resolveSchedule } from '../../domain/tournaments/schedule.js';
 import { MissingConfigurationError, PermissionError, ValidationError } from '../../types/errors.js';
 import { DateTime } from 'luxon';
 import type { PrizeConfiguration } from '../../database/schema/tournaments.js';
+import { addTournamentTestSubcommand, executeTournamentTest } from './tournament-test.js';
 
 export const tournamentCommand = new SlashCommandBuilder()
   .setName('tournament')
@@ -34,7 +35,8 @@ export const tournamentCommand = new SlashCommandBuilder()
       .addIntegerOption((opt) =>
         opt.setName('entry_fee_pence').setDescription('Entry fee in pence (default 1500 = £15.00)').setRequired(false),
       ),
-  );
+  )
+  .addSubcommand((sub) => addTournamentTestSubcommand(sub));
 
 export async function executeTournamentCommand(interaction: ChatInputCommandInteraction, ctx: AppContext): Promise<void> {
   if (!interaction.inGuild() || !interaction.guild) {
@@ -49,6 +51,10 @@ export async function executeTournamentCommand(interaction: ChatInputCommandInte
   }
 
   const subcommand = interaction.options.getSubcommand();
+  if (subcommand === 'test') {
+    await executeTournamentTest(interaction, ctx);
+    return;
+  }
   if (subcommand !== 'create') return;
 
   const status = checkGuildConfigStatus(config);

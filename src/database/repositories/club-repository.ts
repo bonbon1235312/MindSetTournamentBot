@@ -32,3 +32,9 @@ export async function findOrCreateClub(
 export async function getClubById(db: Database, id: string): Promise<Club | undefined> {
   return db.query.clubs.findFirst({ where: eq(clubs.id, id) });
 }
+
+/** Test-diagnostic teardown only (/tournament test) — clubs are a durable
+ * cross-tournament identity in normal use and are never deleted otherwise. */
+export async function deleteClub(db: Database, id: string): Promise<void> {
+  await db.delete(clubs).where(eq(clubs.id, id));
+}

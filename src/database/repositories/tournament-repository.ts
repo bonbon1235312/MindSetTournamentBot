@@ -57,3 +57,11 @@ export async function setTournamentPaused(
   if (!updated) throw new Error(`Tournament ${id} not found`);
   return updated;
 }
+
+/** Test-diagnostic teardown only (/tournament test) — real tournaments are
+ * never physically deleted (section 33: history is kept forever). Cascades
+ * through tournament_entries, groups, group_memberships, and fixtures
+ * automatically (all FK'd with onDelete: 'cascade' back to this table). */
+export async function deleteTournament(db: Database, id: string): Promise<void> {
+  await db.delete(tournaments).where(eq(tournaments.id, id));
+}

@@ -235,6 +235,25 @@ resolved schedule times. At kickoff, `GROUP_PUBLISH` builds the eligible
 co-manager, generates the round-robin fixtures, and posts the fixtures
 graphic — all verified live against a real tournament and the real guild.
 
+## Testing the tournament flow — `/tournament test`
+
+`/tournament test [team_count] [cleanup]` (staff only) runs the entire
+group-publish pipeline immediately, against fake signups, instead of
+waiting for a real signup window and a real kickoff time. It creates
+`team_count` (default 8) fake clubs/entries — all payment-confirmed, all
+managed by whoever runs the command so real Discord role-assignment
+actually gets exercised — runs the exact same production pipeline
+`GROUP_PUBLISH` uses, verifies the result (right membership/fixture
+counts, every Discord resource actually created, the graphic actually
+posted), and replies with a phase-by-phase ✅/❌ report so you can see
+precisely where it broke if it did. By default (`cleanup:true`) it deletes
+every Discord role/channel and database row it created afterward; pass
+`cleanup:false` to leave everything in place for manual inspection — test
+channels are named `group-test-<id>-*` so they're easy to spot and remove
+by hand later. It's safe to run alongside a real live tournament: a random
+per-run prefix keeps its group codes (and therefore its Discord channel
+names) from ever colliding with a real tournament's "Group A", etc.
+
 ## Result submission, staff conflict resolution, knockout progression
 
 **Not yet implemented** — see [PLAN.md's "Known gaps"](./PLAN.md#known-gaps)
@@ -320,6 +339,9 @@ connection string.
 - [ ] At the tournament's group-publish time, groups actually appear: role +
       3 channels per group, fixtures graphic posted, tournament status moves
       to `GROUP_CONFIRMATION`
+- [ ] `/tournament test` (default options) reports all phases ✅ and cleans
+      up after itself — check the guild afterward to confirm no leftover
+      `group-test-*` channels/roles and no leftover `TEST RUN` tournament
 - [ ] `/ticket-panel` posts the panel; clicking a ticket type creates a
       private channel; Claim and Close buttons both work
 - [ ] A member joining/leaving posts to the welcome channel (once the
