@@ -1,38 +1,15 @@
-import 'dotenv/config';
-import { bootstrap } from './app/bootstrap.js';
-import { registerShutdownHandlers } from './app/shutdown.js';
-
 /**
- * Last-resort safety net. Every code path we control already has its own
- * try/catch (the interaction router's error boundary, the scheduler's
- * per-job try/catch, etc.) — these two handlers exist for whatever isn't
- * covered by one of those: a rejected promise nobody awaited, an error
- * thrown by a dependency outside our control, anything.
+ * Compatibility entrypoint for the Pterodactyl "Discord - TypeScript" egg.
  *
- * Deliberately using console.error (synchronous, writes straight to
- * stderr) rather than the Pino logger here: Pino's pretty-print transport
- * runs in a worker thread, and if the process is already crashing, there
- * is no guarantee that thread gets to flush its buffer before the process
- * exits — which would make a real crash look like a silent one in a
- * process-manager console. This is intentionally the one place in the
- * codebase that does NOT use the structured logger, for that reason.
+ * The egg hard-codes `npx ts-node ...`, but this NodeNext ESM project uses
+ * `.js` import specifiers that point to TypeScript source files. ts-node's
+ * default ESM resolver cannot remap those specifiers on Node 24 without an
+ * extra loader flag that the panel does not expose.
+ *
+ * tsx's programmatic importer performs that resolution in-process, so the
+ * fixed egg command can remain unchanged and no NODE_OPTIONS variable is
+ * required.
  */
-process.on('uncaughtException', (error) => {
-  console.error('FATAL: uncaughtException —', error);
-  process.exit(1);
-});
+import { tsImport } from 'tsx/esm/api';
 
-process.on('unhandledRejection', (reason) => {
-  console.error('FATAL: unhandledRejection —', reason);
-  process.exit(1);
-});
-
-async function main(): Promise<void> {
-  const ctx = await bootstrap();
-  registerShutdownHandlers(ctx);
-}
-
-main().catch((error: unknown) => {
-  console.error('Fatal startup error:', error);
-  process.exit(1);
-});
+await tsImport('./main.ts', import.meta.url);

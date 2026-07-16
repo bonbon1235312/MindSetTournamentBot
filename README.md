@@ -183,30 +183,20 @@ if [ -f /home/container/package.json ]; then /usr/local/bin/npm install; fi;
 npx ts-node /home/container/${BOT_TS_FILE}
 ```
 
-That means: **no build step runs at all** — it executes TypeScript source
-directly via `ts-node`, driven entirely by the `BOT_TS_FILE` panel
-variable. Two things are required for that to actually work with this
-project (both verified locally against the identical command before being
-documented here):
+That means: **no build step runs at all** — it executes the compatibility
+entrypoint directly via `ts-node`, driven by the `BOT_TS_FILE` panel
+variable. Set **`BOT_TS_FILE=src/index.ts`**.
 
-1. **Startup variable `BOT_TS_FILE`** → set it to `src/index.ts`.
-2. **Environment variable `NODE_OPTIONS`** → set it to `--loader ts-node/esm`.
-   Without this, `npx ts-node` fails immediately with
-   `Cannot find module '.../bootstrap.js'` — this codebase's `NodeNext`
-   module resolution requires `.js` extensions in every relative import
-   (pointing at the `.ts` source, per TypeScript's own ESM convention), and
-   plain `ts-node` does not remap those back to the real `.ts` files on its
-   own; only its `ts-node/esm` loader does. `package.json` already declares
-   `"ts-node": { "esm": true }`, but empirically that alone was **not**
-   sufficient with this egg's exact invocation — the explicit loader via
-   `NODE_OPTIONS` was the only combination that worked when tested.
+`src/index.ts` is deliberately a tiny Pterodactyl compatibility shim. It
+uses tsx's programmatic importer to start the real application entrypoint
+at `src/main.ts`, including correct NodeNext ESM resolution on Node 24.
+No console command or `NODE_OPTIONS` loader variable is required.
 
 Setup steps:
 
 1. Create the server, point it at this repository.
-2. Set `BOT_TS_FILE=src/index.ts` and `NODE_OPTIONS=--loader ts-node/esm`
-   as panel variables, alongside every variable from `.env.example`. Do
-   **not** commit a real `.env` file — it's gitignored.
+2. Set `BOT_TS_FILE=src/index.ts` alongside every application variable from
+   `.env.example`. Do **not** commit a real `.env` file — it's gitignored.
 3. Before first start (or after any schema change), run `npm run db:migrate`
    once via the panel's console.
 4. Run `npm run commands:deploy` once after every deploy where slash
