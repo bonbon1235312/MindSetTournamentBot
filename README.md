@@ -173,22 +173,58 @@ npm start                    # node dist/index.js — no ts-node/tsx at runtime
 
 ## Pterodactyl deployment
 
-This project is built for the **"Discord - TypeScript"** loader:
+**Correction, verified live against the real container:** this project was
+originally documented (wrongly) as using the egg's `npm install && npm run
+build && npm start` sequence. The actual egg in use here runs a fixed
+startup script instead:
 
-1. Create a new server with that egg, point it at this repository (or
-   upload the built artifact).
-2. Startup command: the egg's default `npm install && npm run build && npm
-   start` sequence works unmodified — all three of `npm install`, `npm run
-   build`, and `npm start` are verified working commands in this project.
-3. Add every variable from `.env.example` in the panel's **Startup**
-   variables tab. Do **not** commit a real `.env` file — it's gitignored.
-4. Before first start (or after any schema change), run `npm run db:migrate`
+```
+if [ -f /home/container/package.json ]; then /usr/local/bin/npm install; fi;
+npx ts-node /home/container/${BOT_TS_FILE}
+```
+
+That means: **no build step runs at all** — it executes TypeScript source
+directly via `ts-node`, driven entirely by the `BOT_TS_FILE` panel
+variable. Two things are required for that to actually work with this
+project (both verified locally against the identical command before being
+documented here):
+
+1. **Startup variable `BOT_TS_FILE`** → set it to `src/index.ts`.
+2. **Environment variable `NODE_OPTIONS`** → set it to `--loader ts-node/esm`.
+   Without this, `npx ts-node` fails immediately with
+   `Cannot find module '.../bootstrap.js'` — this codebase's `NodeNext`
+   module resolution requires `.js` extensions in every relative import
+   (pointing at the `.ts` source, per TypeScript's own ESM convention), and
+   plain `ts-node` does not remap those back to the real `.ts` files on its
+   own; only its `ts-node/esm` loader does. `package.json` already declares
+   `"ts-node": { "esm": true }`, but empirically that alone was **not**
+   sufficient with this egg's exact invocation — the explicit loader via
+   `NODE_OPTIONS` was the only combination that worked when tested.
+
+Setup steps:
+
+1. Create the server, point it at this repository.
+2. Set `BOT_TS_FILE=src/index.ts` and `NODE_OPTIONS=--loader ts-node/esm`
+   as panel variables, alongside every variable from `.env.example`. Do
+   **not** commit a real `.env` file — it's gitignored.
+3. Before first start (or after any schema change), run `npm run db:migrate`
    once via the panel's console.
-5. Run `npm run commands:deploy` once after every deploy where slash
+4. Run `npm run commands:deploy` once after every deploy where slash
    commands changed (`/setup`, `/tournament`, `/payments`, `/ticket-panel`
    currently). Set `COMMAND_DEPLOY_MODE=global` for production once you're
    past active development — global propagation can take up to an hour,
    `guild` mode is instant but only registers to `DISCORD_GUILD_ID`.
+5. Also make sure the **GuildMembers privileged intent** is enabled (see
+   above) — without it the bot connects to the database fine and then
+   fails immediately with "Used disallowed intents," which looks like a
+   different problem but is the same portal toggle.
+
+If you'd rather not rely on `ts-node` at runtime at all, the standard
+`npm install && npm run build && npm start` flow (compiles to `dist/`,
+then runs plain Node — no loader flags needed) also works and was verified
+separately; it just isn't what this specific egg's fixed startup script
+invokes, so switching to it means overriding the egg's startup command in
+the panel rather than only setting variables.
 
 ## Slash-command deployment
 
