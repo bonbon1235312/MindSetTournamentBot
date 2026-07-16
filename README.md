@@ -188,9 +188,11 @@ entrypoint directly via `ts-node`, driven by the `BOT_TS_FILE` panel
 variable. Set **`BOT_TS_FILE=src/index.ts`**.
 
 `src/index.ts` is deliberately a tiny Pterodactyl compatibility shim. It
-uses tsx's programmatic importer to start the real application entrypoint
-at `src/main.ts`, including correct NodeNext ESM resolution on Node 24.
-No console command or `NODE_OPTIONS` loader variable is required.
+registers ts-node's transpile-only ESM loader programmatically before
+starting the real application entrypoint at `src/main.ts`, including correct
+NodeNext ESM resolution on Node 24 even when the host omits development-only
+type packages. No console command or `NODE_OPTIONS` loader variable is
+required.
 
 Setup steps:
 

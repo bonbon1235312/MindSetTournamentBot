@@ -6,10 +6,11 @@
  * default ESM resolver cannot remap those specifiers on Node 24 without an
  * extra loader flag that the panel does not expose.
  *
- * tsx's programmatic importer performs that resolution in-process, so the
- * fixed egg command can remain unchanged and no NODE_OPTIONS variable is
- * required.
+ * Registering ts-node's ESM loader programmatically performs that resolution
+ * in-process, so the fixed egg command can remain unchanged and no
+ * NODE_OPTIONS variable is required.
  */
-import { tsImport } from 'tsx/esm/api';
+import { register } from 'node:module';
 
-await tsImport('./main.ts', import.meta.url);
+register('ts-node/esm/transpile-only', import.meta.url);
+await import('./main.js');
