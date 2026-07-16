@@ -52,8 +52,13 @@ ticket system and welcome/goodbye messages.
 - Dual-sided result submission: a results-panel embed per group/round with
   a fixture picker, home/away-normalized score modals (manager, co-manager,
   or staff), silent auto-resolve when both sides agree, and a staff
-  conflict panel when they don't — verified live end-to-end (matching
-  submissions, a mismatch, and a staff override all confirmed)
+  conflict panel when they don't — every submission authorized
+  server-side against the real database, not trusted from the interaction
+  — verified live end-to-end (matching submissions, a mismatch, a staff
+  override, and an unauthorized-submission attempt all confirmed)
+- Staff "Confirm Group Complete" button once every fixture in a group is
+  resolved — posts the final standings graphic pinging the group role and
+  pins it, one-time only
 - Fixtures graphic posted and pinned at the top of each group/round's chat
   channel; the results channel is reserved for the results panel
 - Branded, monochrome SVG→PNG tournament graphics (group fixtures, group
@@ -336,20 +341,35 @@ both submissions side by side, with buttons to accept either one or
 manually override with a fresh score. The results panel refreshes in
 place (edited, never reposted) after every submission or resolution.
 
-Once every group fixture is resolved, the knockout pipeline (see
-"Testing the tournament flow" above) picks up automatically — there's no
-separate trigger to run.
+Every submission is authorized server-side against the actual database
+state, not trusted from the interaction itself: a manager can only submit
+for the specific team they manage or co-manage, re-checked at the moment
+they submit (not just when the menu was first shown), and a staff-only
+action re-checks staff membership the same way — a tampered or forged
+interaction can point at a fixture, but it can never bypass who's actually
+allowed to act on it.
+
+Once every fixture in a group is resolved, staff get a **Confirm Group
+Complete** button on that group's results panel (disabled until every
+fixture actually has a result). Confirming posts the final standings
+graphic in the group's chat channel, pinging the group role and pinning
+it, and locks the button so it can't be triggered twice. This does **not**
+automatically trigger the knockout draw — see "Testing the tournament
+flow" above for the one place that currently does
+(`/tournament test`'s simulation); there's still no automatic "all group
+fixtures resolved" trigger for it in production.
 
 The domain logic behind all of this (standings, qualification, knockout
 draw, home/away result normalization, knockout-specific validation) was
 built and unit-tested earlier in this project; this is the Discord-facing
 wiring that finally calls it. Verified live against the real database and
-guild: a matching dual submission, a mismatched one, and a staff override
-all confirmed to resolve correctly. What couldn't be verified interactively
-is the actual button-click/modal-submit UI — there's no second Discord
-account available to click as a "user" distinct from staff (same
-limitation as the ticket system) — verification went through the same
-service functions the real Discord handlers call. See
+guild: a matching dual submission, a mismatched one, a staff override, an
+unauthorized submission attempt, and a group confirmation (including
+correctly rejecting a second attempt) all behaved correctly. What couldn't
+be verified interactively is the actual button-click/modal-submit UI —
+there's no second Discord account available to click as a "user" distinct
+from staff (same limitation as the ticket system) — verification went
+through the same service functions the real Discord handlers call. See
 [PLAN.md's "Known gaps"](./PLAN.md#known-gaps) for what's still separately
 missing: confirmation/overdue reminders, prize-deadline and midnight-cleanup
 jobs, and an evidence/dispute system.
@@ -442,6 +462,14 @@ connection string.
       updates in place after each of these
 - [ ] The staff conflict panel's "Accept Submission 1/2" and "Manual
       Override" buttons all resolve the fixture correctly
+- [ ] A manager cannot submit for a fixture they aren't part of (rejected
+      with a permission error, both at fixture-select time and if a
+      submission is somehow forced through to the modal-submit step)
+- [ ] Once every fixture in a group is resolved, "Confirm Group Complete"
+      becomes clickable; clicking it posts the standings graphic pinging
+      the group role, pins it, and the button becomes disabled/relabeled
+      "✅ Group Confirmed" — clicking again (or via another group) is
+      correctly refused if already confirmed
 - [ ] `/tournament test` (default options) reports all phases ✅ — including
       the knockout pipeline phases, ending in a declared champion and
       tournament status `COMPLETED` — and cleans up after itself; check the

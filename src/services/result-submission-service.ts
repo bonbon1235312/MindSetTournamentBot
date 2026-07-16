@@ -1,8 +1,10 @@
 import type { Database } from '../database/client.js';
 import type { Fixture } from '../database/schema/index.js';
-import { getGroupById, updateGroupResources } from '../database/repositories/group-repository.js';
+import { getGroupById, getGroupMemberships, updateGroupResources } from '../database/repositories/group-repository.js';
 import { getKnockoutRoundById, updateKnockoutRoundResources } from '../database/repositories/knockout-round-repository.js';
 import { getFixturesByGroup, getFixturesByKnockoutRound, getFixtureById, resolveFixtureResult, updateFixtureStatus } from '../database/repositories/fixture-repository.js';
+import { getEntryById } from '../database/repositories/entry-repository.js';
+import { getClubById } from '../database/repositories/club-repository.js';
 import {
   createResultSubmission,
   getActiveSubmissionForEntry,
@@ -11,7 +13,8 @@ import {
 } from '../database/repositories/result-submission-repository.js';
 import { normalizeSubmission, submissionsMatch, type RawSubmission, type CanonicalResult } from '../domain/fixtures/result-matching.js';
 import { validateKnockoutResult } from '../domain/fixtures/result-validation.js';
-import { assertFixtureTransition } from '../domain/fixtures/state-machine.js';
+import { assertFixtureTransition, isResolvedFixtureStatus } from '../domain/fixtures/state-machine.js';
+import { calculateStandings, type StandingsEntryInput, type FixtureResultInput, type TeamStanding } from '../domain/standings/standings.js';
 import { STAGE_LABELS } from '../domain/knockouts/knockout-draw.js';
 import { ValidationError, PermissionError } from '../types/errors.js';
 
@@ -21,6 +24,9 @@ export interface FixtureParentContext {
   chatChannelId: string | null;
   resultsPanelMessageId: string | null;
   label: string;
+  /** Only set for a group — knockout rounds don't have a "confirm complete"
+   * concept (yet). Lets the results panel conditionally show that button. */
+  group: { id: string; groupCode: string; roleId: string | null; qualificationSlots: number; confirmationMessageId: string | null } | null;
   getAllFixtures(db: Database): Promise<Fixture[]>;
   setResultsPanelMessageId(db: Database, messageId: string): Promise<void>;
 }
@@ -38,6 +44,13 @@ export async function getFixtureParentContext(db: Database, fixture: Fixture): P
       chatChannelId: group.chatChannelId,
       resultsPanelMessageId: group.resultsPanelMessageId,
       label: `Group ${group.groupCode}`,
+      group: {
+        id: group.id,
+        groupCode: group.groupCode,
+        roleId: group.roleId,
+        qualificationSlots: group.qualificationSlots,
+        confirmationMessageId: group.confirmationMessageId,
+      },
       getAllFixtures: (db2) => getFixturesByGroup(db2, group.id),
       setResultsPanelMessageId: async (db2, messageId) => {
         await updateGroupResources(db2, group.id, { resultsPanelMessageId: messageId });
@@ -53,6 +66,7 @@ export async function getFixtureParentContext(db: Database, fixture: Fixture): P
       chatChannelId: round.chatChannelId,
       resultsPanelMessageId: round.resultsPanelMessageId,
       label: STAGE_LABELS[round.stage],
+      group: null,
       getAllFixtures: (db2) => getFixturesByKnockoutRound(db2, round.id),
       setResultsPanelMessageId: async (db2, messageId) => {
         await updateKnockoutRoundResources(db2, round.id, { resultsPanelMessageId: messageId });
@@ -215,4 +229,54 @@ export async function processStaffOverride(
  * conflict panel to show staff exactly what each side reported. */
 export async function getFixtureSubmissions(db: Database, fixtureId: string) {
   return getActiveSubmissionsForFixture(db, fixtureId);
+}
+
+/** Same standings computation the knockout pipeline uses, extracted so the
+ * "confirm group complete" flow doesn't duplicate it. */
+export async function computeGroupStandings(db: Database, groupId: string): Promise<TeamStanding[]> {
+  const memberships = await getGroupMemberships(db, groupId);
+  const fixtures = await getFixturesByGroup(db, groupId);
+
+  const standingsEntries: StandingsEntryInput[] = [];
+  for (const membership of memberships) {
+    const entry = await getEntryById(db, membership.tournamentEntryId);
+    if (!entry) continue;
+    const club = await getClubById(db, entry.clubId);
+    standingsEntries.push({ entryId: entry.id, teamName: club?.displayName ?? 'Unknown Team' });
+  }
+
+  const results: FixtureResultInput[] = fixtures
+    .filter((f) => f.homeScore !== null && f.awayScore !== null)
+    .map((f) => ({ homeEntryId: f.homeEntryId, awayEntryId: f.awayEntryId, homeScore: f.homeScore!, awayScore: f.awayScore! }));
+
+  return calculateStandings(standingsEntries, results);
+}
+
+export interface GroupConfirmResult {
+  standings: TeamStanding[];
+  qualifyingPositions: number;
+}
+
+/** Staff-triggered "this group is done" step: validates every fixture has
+ * reached a terminal state and the group hasn't already been confirmed,
+ * then hands back the final standings for the caller to render/post. Does
+ * not itself touch Discord — see the results-submission-flow component for
+ * the graphic + role ping + pin + confirmationMessageId bookkeeping. */
+export async function confirmGroupComplete(db: Database, groupId: string): Promise<GroupConfirmResult> {
+  const group = await getGroupById(db, groupId);
+  if (!group) throw new Error(`Group ${groupId} not found`);
+  if (group.confirmationMessageId) {
+    throw new ValidationError('This group has already been confirmed.');
+  }
+
+  const fixtures = await getFixturesByGroup(db, groupId);
+  const unresolved = fixtures.filter((f) => !isResolvedFixtureStatus(f.status));
+  if (unresolved.length > 0) {
+    throw new ValidationError(
+      `${unresolved.length} of ${fixtures.length} fixture(s) still need a result before this group can be confirmed.`,
+    );
+  }
+
+  const standings = await computeGroupStandings(db, groupId);
+  return { standings, qualifyingPositions: group.qualificationSlots };
 }

@@ -10,22 +10,25 @@ import {
 } from 'discord.js';
 import type { AppContext } from '../../types/context.js';
 import type { Fixture } from '../../database/schema/index.js';
-import { getFixtureById } from '../../database/repositories/fixture-repository.js';
+import { getFixtureById, getFixturesByGroup, resolveFixtureResult } from '../../database/repositories/fixture-repository.js';
 import { getEntryById } from '../../database/repositories/entry-repository.js';
 import { getClubById } from '../../database/repositories/club-repository.js';
+import { getGroupById, updateGroupResources } from '../../database/repositories/group-repository.js';
+import { getTournamentById } from '../../database/repositories/tournament-repository.js';
 import { getOrCreateGuildConfig } from '../../database/repositories/guild-config-repository.js';
 import { isStaffMember } from '../permissions/staff.js';
 import {
   processManagerSubmission,
   processStaffOverride,
+  confirmGroupComplete,
   getFixtureParentContext,
   getFixtureSubmissions,
   resolveSubmittingEntryId,
   isStaffOverridable,
   type FixtureParentContext,
 } from '../../services/result-submission-service.js';
-import { resolveFixtureResult } from '../../database/repositories/fixture-repository.js';
-import { assertFixtureTransition } from '../../domain/fixtures/state-machine.js';
+import { renderGroupStandingsGraphic } from '../../graphics/renderers/group-standings-renderer.js';
+import { assertFixtureTransition, isResolvedFixtureStatus } from '../../domain/fixtures/state-machine.js';
 import { buildResultsPanelEmbed, buildResultsPanelComponents, buildConflictPanelEmbed, buildConflictPanelComponents } from '../embeds/results-panel-embed.js';
 import { encodeCustomId, decodeCustomId } from '../interactions/custom-id.js';
 import { recordAuditEvent, newCorrelationId } from '../../domain/audit/audit-log.js';
@@ -66,7 +69,17 @@ async function refreshResultsPanel(ctx: AppContext, guild: Guild, parent: Fixtur
 
   const fixtures = await parent.getAllFixtures(ctx.db);
   const embed = await buildResultsPanelEmbed(ctx, fixtures, parent.label);
-  const components = await buildResultsPanelComponents(ctx, fixtures);
+  const components = await buildResultsPanelComponents(
+    ctx,
+    fixtures,
+    parent.group
+      ? {
+          groupId: parent.group.id,
+          allResolved: fixtures.every((f) => isResolvedFixtureStatus(f.status)),
+          alreadyConfirmed: parent.group.confirmationMessageId !== null,
+        }
+      : undefined,
+  );
   await message.edit({ embeds: [embed], components }).catch((error) => {
     ctx.logger.warn({ error }, 'Could not refresh the results panel');
   });
@@ -161,11 +174,14 @@ export async function handleFixtureSelect(interaction: StringSelectMenuInteracti
     return;
   }
 
-  let submittingEntryId: string;
+  // Fail fast so an unauthorized user gets an immediate, clear rejection
+  // instead of filling out a modal only to be rejected on submit — the
+  // authoritative check (untrusted-input-safe) is re-run server-side in
+  // handleSubmitResultModal regardless of what happens here.
   try {
     const homeEntry = await getEntryById(ctx.db, fixture.homeEntryId);
     const awayEntry = await getEntryById(ctx.db, fixture.awayEntryId);
-    submittingEntryId = resolveSubmittingEntryId(
+    resolveSubmittingEntryId(
       fixture,
       [homeEntry?.managerUserId, homeEntry?.coManagerUserId].filter((id): id is string => !!id),
       [awayEntry?.managerUserId, awayEntry?.coManagerUserId].filter((id): id is string => !!id),
@@ -180,7 +196,7 @@ export async function handleFixtureSelect(interaction: StringSelectMenuInteracti
   }
 
   const modal = new ModalBuilder()
-    .setCustomId(encodeCustomId(NAMESPACE, 'submit_modal', fixtureId, submittingEntryId))
+    .setCustomId(encodeCustomId(NAMESPACE, 'submit_modal', fixtureId))
     .setTitle(`${home} vs ${away}`.slice(0, 45))
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -203,10 +219,34 @@ export async function handleFixtureSelect(interaction: StringSelectMenuInteracti
   await interaction.showModal(modal);
 }
 
-export async function handleSubmitResultModal(interaction: ModalSubmitInteraction, ctx: AppContext, fixtureId: string, submittingEntryId: string): Promise<void> {
+export async function handleSubmitResultModal(interaction: ModalSubmitInteraction, ctx: AppContext, fixtureId: string): Promise<void> {
   if (!interaction.inGuild() || !interaction.guild) return;
   const fixture = await getFixtureById(ctx.db, fixtureId);
   if (!fixture) throw new NotFoundError('Fixture');
+
+  // Custom IDs aren't cryptographically signed (see custom-id.ts) — a
+  // submittingEntryId embedded in the modal's custom_id at select-time
+  // would be client-controlled data by the time this handler runs, so it
+  // must never be trusted directly. Re-derive who the current user is
+  // actually authorized to submit for from the database, same check
+  // handleFixtureSelect already ran once before showing the modal.
+  const homeEntry = await getEntryById(ctx.db, fixture.homeEntryId);
+  const awayEntry = await getEntryById(ctx.db, fixture.awayEntryId);
+  let submittingEntryId: string;
+  try {
+    submittingEntryId = resolveSubmittingEntryId(
+      fixture,
+      [homeEntry?.managerUserId, homeEntry?.coManagerUserId].filter((id): id is string => !!id),
+      [awayEntry?.managerUserId, awayEntry?.coManagerUserId].filter((id): id is string => !!id),
+      interaction.user.id,
+    );
+  } catch (error) {
+    if (error instanceof PermissionError) {
+      await interaction.reply({ content: `❌ ${error.message}`, ephemeral: true });
+      return;
+    }
+    throw error;
+  }
 
   const myScore = parseScoreInput(interaction.fields.getTextInputValue('my_score'), 'Your score');
   const oppScore = parseScoreInput(interaction.fields.getTextInputValue('opp_score'), "Opponent's score");
@@ -252,6 +292,15 @@ export async function handleSubmitResultModal(interaction: ModalSubmitInteractio
 
 export async function handleStaffOverrideModal(interaction: ModalSubmitInteraction, ctx: AppContext, fixtureId: string): Promise<void> {
   if (!interaction.inGuild() || !interaction.guild) return;
+
+  // A staff-only modal shown from handleFixtureSelect's isStaffMember gate
+  // isn't itself protected — a forged submit_modal:staff_modal interaction
+  // would reach this handler directly, bypassing that gate entirely. Same
+  // "never trust the path that got you here" re-check as everywhere else.
+  const config = await getOrCreateGuildConfig(ctx.db, interaction.guildId);
+  const member = await interaction.guild.members.fetch(interaction.user.id);
+  if (!isStaffMember(member, config)) throw new PermissionError('Staff management only.');
+
   const fixture = await getFixtureById(ctx.db, fixtureId);
   if (!fixture) throw new NotFoundError('Fixture');
 
@@ -372,4 +421,95 @@ export async function handleConflictResolutionButton(interaction: ButtonInteract
   });
 
   await interaction.update({ content: `✅ Resolved: ${resolved.homeScore}-${resolved.awayScore}.`, embeds: [], components: [] });
+}
+
+/**
+ * Staff-only "this group is done" step. Validates every fixture actually
+ * has a result, renders the final standings graphic, posts it (pinging the
+ * group role) and pins it in the group's chat channel, and marks the group
+ * confirmed so this can't be triggered twice.
+ */
+export async function handleConfirmGroupButton(interaction: ButtonInteraction, ctx: AppContext, groupId: string): Promise<void> {
+  if (!interaction.inGuild() || !interaction.guild) return;
+  const config = await getOrCreateGuildConfig(ctx.db, interaction.guildId);
+  const member = await interaction.guild.members.fetch(interaction.user.id);
+  if (!isStaffMember(member, config)) throw new PermissionError('Staff management only.');
+
+  const group = await getGroupById(ctx.db, groupId);
+  if (!group) throw new NotFoundError('Group');
+
+  let result;
+  try {
+    result = await confirmGroupComplete(ctx.db, groupId);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      await interaction.reply({ content: `❌ ${error.message}`, ephemeral: true });
+      return;
+    }
+    throw error;
+  }
+
+  if (!group.chatChannelId) {
+    await interaction.reply({ content: "This group has no chat channel to post standings in.", ephemeral: true });
+    return;
+  }
+  const chatChannel = await interaction.guild.channels.fetch(group.chatChannelId).catch(() => null);
+  if (!chatChannel?.isTextBased()) {
+    await interaction.reply({ content: "This group's chat channel could not be found.", ephemeral: true });
+    return;
+  }
+
+  const tournament = await getTournamentById(ctx.db, group.tournamentId);
+  const graphic = await renderGroupStandingsGraphic(
+    {
+      tournamentName: tournament?.name ?? 'Tournament',
+      groupCode: group.groupCode,
+      standings: result.standings,
+      qualifyingPositions: result.qualifyingPositions,
+    },
+    ctx.env.GRAPHICS_CACHE_DIR,
+  );
+
+  const roleMention = group.roleId ? `<@&${group.roleId}> ` : '';
+  const message = await chatChannel.send({
+    content: `${roleMention}🏁 **Group ${group.groupCode}** is complete! Final standings:`,
+    files: [{ attachment: graphic.buffer, name: 'group-standings.png' }],
+    ...(group.roleId ? { allowedMentions: { roles: [group.roleId] } } : {}),
+  });
+  await message.pin().catch((error) => {
+    ctx.logger.warn({ error, groupId }, 'Could not pin the standings graphic — missing Manage Messages permission');
+  });
+
+  await updateGroupResources(ctx.db, group.id, { confirmationMessageId: message.id });
+
+  await recordAuditEvent(ctx.db, ctx.logger, {
+    guildId: interaction.guildId!,
+    tournamentId: group.tournamentId,
+    actorType: 'ADMIN',
+    actorDiscordId: interaction.user.id,
+    action: 'group.confirm_complete',
+    targetEntityType: 'group',
+    targetEntityId: group.id,
+    afterState: { standingsMessageId: message.id },
+    correlationId: newCorrelationId(),
+    interactionId: interaction.id,
+  });
+
+  if (group.resultsChannelId && group.resultsPanelMessageId) {
+    const resultsChannel = await interaction.guild.channels.fetch(group.resultsChannelId).catch(() => null);
+    if (resultsChannel?.isTextBased()) {
+      const panelMsg = await resultsChannel.messages.fetch(group.resultsPanelMessageId).catch(() => null);
+      if (panelMsg) {
+        const fixtures = await getFixturesByGroup(ctx.db, group.id);
+        const embed = await buildResultsPanelEmbed(ctx, fixtures, `Group ${group.groupCode}`);
+        const components = await buildResultsPanelComponents(ctx, fixtures, { groupId: group.id, allResolved: true, alreadyConfirmed: true });
+        await panelMsg.edit({ embeds: [embed], components }).catch(() => {});
+      }
+    }
+  }
+
+  await interaction.reply({
+    content: `✅ Group ${group.groupCode} confirmed — standings posted and pinned in <#${group.chatChannelId}>.`,
+    ephemeral: true,
+  });
 }

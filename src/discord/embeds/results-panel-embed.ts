@@ -79,6 +79,7 @@ export async function buildResultsPanelEmbed(ctx: AppContext, fixtures: Fixture[
 export async function buildResultsPanelComponents(
   ctx: AppContext,
   fixtures: Fixture[],
+  groupConfirm?: { groupId: string; allResolved: boolean; alreadyConfirmed: boolean },
 ): Promise<ActionRowBuilder<MessageActionRowComponentBuilder>[]> {
   const submittable = fixtures.filter((f) => isManagerSubmittable(f.status));
 
@@ -98,7 +99,18 @@ export async function buildResultsPanelComponents(
     select.addOptions(options);
   }
 
-  return [new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(select)];
+  const rows = [new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(select)];
+
+  if (groupConfirm) {
+    const button = new ButtonBuilder()
+      .setCustomId(encodeCustomId('group', 'confirm', groupConfirm.groupId))
+      .setLabel(groupConfirm.alreadyConfirmed ? '✅ Group Confirmed' : 'Confirm Group Complete')
+      .setStyle(groupConfirm.alreadyConfirmed ? ButtonStyle.Secondary : ButtonStyle.Success)
+      .setDisabled(groupConfirm.alreadyConfirmed || !groupConfirm.allResolved);
+    rows.push(new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(button));
+  }
+
+  return rows;
 }
 
 export function buildConflictPanelEmbed(

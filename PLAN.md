@@ -313,6 +313,55 @@ not the handlers themselves. The panel-embed rendering logic (status
 lines, score formatting) was checked by direct code review rather than a
 live round-trip for the same reason.
 
+**A real authorization bug was caught by re-reading this code, not by
+testing it.** `custom-id.ts`'s own doc comment states the security
+contract plainly: custom IDs aren't cryptographically signed, so every
+handler must re-validate the encoded data against current database state
+before acting — a tampered custom_id can point at data but must never
+bypass a server-side check. The first version of `handleSubmitResultModal`
+violated exactly this: it trusted a `submittingEntryId` embedded in the
+modal's own custom_id (set once, at select-time) instead of re-deriving it
+from `interaction.user.id` at submit-time — a forged modal-submit
+interaction could have claimed to be submitting on behalf of a team the
+actual clicking user had nothing to do with. `handleStaffOverrideModal`
+had the same class of gap one level worse: it never checked
+`isStaffMember` at all, relying entirely on the assumption that only a
+staff member could have reached it via the select menu's earlier gate — a
+forged `fixture:staff_modal:<fixtureId>` interaction would have let anyone
+immediately resolve any fixture with any score, no matching required.
+Both now re-derive/re-check server-side inside the modal handler itself,
+matching the pattern every other handler in this codebase already follows
+(see `handleConflictResolutionButton`, `applyPaymentChange`, etc.).
+Verified live: an unauthorized user ID correctly rejected by
+`resolveSubmittingEntryId` with the expected `PermissionError`.
+
+## Group confirmation
+
+Staff-only "this group is done" step, added to the results panel as a
+second row (only shown for groups — knockout rounds don't have this
+concept): a **Confirm Group Complete** button, disabled until every
+fixture in the group has reached a terminal status (`RESOLVED`/`FORFEIT`/
+`VOID`), and permanently disabled (relabeled "✅ Group Confirmed") once
+used — a group can only be confirmed once
+(`confirmGroupComplete` in `result-submission-service.ts` checks
+`groups.confirmationMessageId` before doing anything, reusing a schema
+field that already existed but was never wired to anything).
+
+On click: computes final standings (the exact same
+`computeGroupStandings` helper the knockout pipeline uses — extracted from
+what used to be duplicated inline logic there), renders the group
+standings graphic, posts it in the group's **chat** channel pinging the
+group role, pins it, and stores the message ID as the confirmation marker.
+The results panel refreshes to show the confirmed state.
+
+**Verified live** against the real database and guild, using an already-
+fully-resolved group from an earlier live test run: `confirmGroupComplete`
+correctly computed and returned standings with the right qualification
+cutoff; the standings graphic posted, pinged the group role, and pinned
+correctly (visually confirmed — the qualification line correctly separates
+the top 2 from the bottom 2); a second confirmation attempt on the same
+group was correctly rejected as already-confirmed.
+
 ## Domain logic (pure functions, fully unit-tested)
 
 | Module | Responsibility |

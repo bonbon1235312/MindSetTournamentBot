@@ -10,12 +10,12 @@ import {
   getLatestKnockoutRound,
   updateKnockoutRoundResources,
 } from '../../database/repositories/knockout-round-repository.js';
-import { calculateStandings, type StandingsEntryInput, type FixtureResultInput } from '../../domain/standings/standings.js';
 import { calculateQualification, type GroupStandingsInput } from '../../domain/qualification/qualification.js';
 import { drawKnockoutPairings, stageForEntrantCount, STAGE_LABELS } from '../../domain/knockouts/knockout-draw.js';
 import { assertEntryTransition } from '../../domain/entries/state-machine.js';
 import { advanceTournamentTo } from '../../services/tournament-progression-service.js';
 import { ensureKnockoutRoundResources } from '../../services/discord-resource-service.js';
+import { computeGroupStandings } from '../../services/result-submission-service.js';
 import { renderKnockoutBracketGraphic } from '../../graphics/renderers/knockout-bracket-renderer.js';
 import { buildResultsPanelEmbed, buildResultsPanelComponents } from '../../discord/embeds/results-panel-embed.js';
 import { recordAuditEvent, newCorrelationId } from '../../domain/audit/audit-log.js';
@@ -194,22 +194,9 @@ export async function runInitialKnockoutDraw(
       throw new Error(`Group ${group.groupCode} has ${unresolved.length} unresolved fixture(s) — cannot calculate qualifiers yet.`);
     }
 
-    const standingsEntries: StandingsEntryInput[] = [];
-    const groupEntryIds: string[] = [];
-    for (const membership of memberships) {
-      const entry = await getEntryById(ctx.db, membership.tournamentEntryId);
-      if (!entry) continue;
-      const club = await getClubById(ctx.db, entry.clubId);
-      standingsEntries.push({ entryId: entry.id, teamName: club?.displayName ?? 'Unknown Team' });
-      groupEntryIds.push(entry.id);
-    }
-    entryIdsByGroup.push(groupEntryIds);
-
-    const results: FixtureResultInput[] = groupFixtures
-      .filter((f) => f.homeScore !== null && f.awayScore !== null)
-      .map((f) => ({ homeEntryId: f.homeEntryId, awayEntryId: f.awayEntryId, homeScore: f.homeScore!, awayScore: f.awayScore! }));
-
-    groupStandingsInputs.push({ groupCode: group.groupCode, standings: calculateStandings(standingsEntries, results) });
+    entryIdsByGroup.push(memberships.map((m) => m.tournamentEntryId));
+    const standings = await computeGroupStandings(ctx.db, group.id);
+    groupStandingsInputs.push({ groupCode: group.groupCode, standings });
   }
 
   const autoQualifiersPerGroup = groups[0]!.qualificationSlots;

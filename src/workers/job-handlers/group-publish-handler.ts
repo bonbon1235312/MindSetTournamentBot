@@ -193,7 +193,11 @@ export async function runGroupPublishPipeline(
     });
 
     const panelEmbed = await buildResultsPanelEmbed(ctx, createdFixtures, `Group ${groupCode}`);
-    const panelComponents = await buildResultsPanelComponents(ctx, createdFixtures);
+    const panelComponents = await buildResultsPanelComponents(ctx, createdFixtures, {
+      groupId: group.id,
+      allResolved: false,
+      alreadyConfirmed: false,
+    });
     const panelMessage = await resources.resultsChannel.send({ embeds: [panelEmbed], components: panelComponents });
 
     currentGroup = await updateGroupResources(ctx.db, group.id, { graphicMessageId: message.id, resultsPanelMessageId: panelMessage.id });
