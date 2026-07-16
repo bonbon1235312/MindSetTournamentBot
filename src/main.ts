@@ -2,6 +2,8 @@ import 'dotenv/config';
 import { bootstrap } from './app/bootstrap.js';
 import { registerShutdownHandlers } from './app/shutdown.js';
 
+console.log(`[MindSet boot] application entry loaded (Node ${process.version})`);
+
 /**
  * Last-resort safety net. Every code path we control already has its own
  * try/catch (the interaction router's error boundary, the scheduler's

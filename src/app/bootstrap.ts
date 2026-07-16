@@ -13,9 +13,11 @@ export async function bootstrap(): Promise<AppContext> {
   const env = loadEnv();
   const logger = createLogger(env);
 
+  console.log(`[MindSet boot] environment validated (NODE_ENV=${env.NODE_ENV})`);
   logger.info({ nodeEnv: env.NODE_ENV }, 'Starting MindSet Tournament Bot...');
 
   const db = createDatabase(env);
+  console.log('[MindSet boot] database client created');
   logger.info('Database client ready.');
 
   const client = createDiscordClient();
@@ -38,10 +40,19 @@ export async function bootstrap(): Promise<AppContext> {
     logger.error({ error }, 'Discord client error');
   });
 
-  await client.login(env.DISCORD_TOKEN);
+  console.log('[MindSet boot] connecting to Discord...');
+  await Promise.race([
+    client.login(env.DISCORD_TOKEN),
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Discord login timed out after 30 seconds')), 30_000).unref();
+    }),
+  ]);
+  console.log(`[MindSet boot] Discord connected as ${client.user?.tag ?? 'unknown user'}`);
 
+  console.log('[MindSet boot] reconciling scheduler jobs...');
   await scheduler.reconcileOnStartup();
   scheduler.start();
+  console.log('[MindSet boot] startup complete');
 
   return ctx;
 }

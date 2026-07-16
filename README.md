@@ -185,19 +185,19 @@ npx ts-node /home/container/${BOT_TS_FILE}
 
 That means: **no build step runs at all** — it executes the compatibility
 entrypoint directly via `ts-node`, driven by the `BOT_TS_FILE` panel
-variable. Set **`BOT_TS_FILE=src/index.ts`**.
+variable. Set **`BOT_TS_FILE=bootstrap.cjs`**.
 
-`src/index.ts` is deliberately a tiny Pterodactyl compatibility shim. It
-registers ts-node's transpile-only ESM loader programmatically before
-starting the real application entrypoint at `src/main.ts`, including correct
-NodeNext ESM resolution on Node 24 even when the host omits development-only
-type packages. No console command or `NODE_OPTIONS` loader variable is
-required.
+`bootstrap.cjs` is deliberately a plain-JavaScript Pterodactyl compatibility
+launcher. It prints synchronous startup checkpoints, registers ts-node's
+transpile-only ESM loader programmatically, and then starts the real
+application entrypoint at `src/main.ts`. This provides correct NodeNext ESM
+resolution on Node 24 even when the host omits development-only type packages.
+No console command or `NODE_OPTIONS` loader variable is required.
 
 Setup steps:
 
 1. Create the server, point it at this repository.
-2. Set `BOT_TS_FILE=src/index.ts` alongside every application variable from
+2. Set `BOT_TS_FILE=bootstrap.cjs` alongside every application variable from
    `.env.example`. Do **not** commit a real `.env` file — it's gitignored.
 3. Before first start (or after any schema change), run `npm run db:migrate`
    once via the panel's console.
