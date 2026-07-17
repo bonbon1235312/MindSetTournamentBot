@@ -18,6 +18,7 @@ import { MissingConfigurationError, PermissionError, TournamentAlreadyActiveErro
 import { DateTime } from 'luxon';
 import type { PrizeConfiguration } from '../../database/schema/tournaments.js';
 import { addTournamentTestSubcommand, executeTournamentTest } from './tournament-test.js';
+import { addTournamentRepairSubcommand, executeTournamentRepair } from './tournament-repair.js';
 
 export const tournamentCommand = new SlashCommandBuilder()
   .setName('tournament')
@@ -41,7 +42,8 @@ export const tournamentCommand = new SlashCommandBuilder()
         opt.setName('entry_fee_pence').setDescription('Entry fee in pence (default 1500 = £15.00)').setRequired(false),
       ),
   )
-  .addSubcommand((sub) => addTournamentTestSubcommand(sub));
+  .addSubcommand((sub) => addTournamentTestSubcommand(sub))
+  .addSubcommand((sub) => addTournamentRepairSubcommand(sub));
 
 export async function executeTournamentCommand(interaction: ChatInputCommandInteraction, ctx: AppContext): Promise<void> {
   if (!interaction.inGuild() || !interaction.guild) {
@@ -58,6 +60,10 @@ export async function executeTournamentCommand(interaction: ChatInputCommandInte
   const subcommand = interaction.options.getSubcommand();
   if (subcommand === 'test') {
     await executeTournamentTest(interaction, ctx);
+    return;
+  }
+  if (subcommand === 'repair') {
+    await executeTournamentRepair(interaction, ctx);
     return;
   }
   if (subcommand !== 'create') return;
@@ -147,6 +153,7 @@ export async function executeTournamentCommand(interaction: ChatInputCommandInte
     ['PREMIUM_CUTOFF', schedule.premiumCutoff],
     ['SIGNUP_CLOSE', schedule.signupClose],
     ['GROUP_PUBLISH', schedule.groupPublish],
+    ['MIDNIGHT_CLEANUP', schedule.cleanup],
   ] as const) {
     await ctx.scheduler.enqueue({
       tournamentId: live.id,

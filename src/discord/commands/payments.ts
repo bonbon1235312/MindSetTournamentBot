@@ -18,10 +18,12 @@ import { and, eq, inArray } from 'drizzle-orm';
 import type { AppContext } from '../../types/context.js';
 import { getOrCreateGuildConfig } from '../../database/repositories/guild-config-repository.js';
 import { isStaffMember } from '../permissions/staff.js';
-import { getEntryById, updatePaymentStatus } from '../../database/repositories/entry-repository.js';
+import { getEntryById, updatePaymentStatus, updateEntryStatus } from '../../database/repositories/entry-repository.js';
+import { assertEntryTransition } from '../../domain/entries/state-machine.js';
 import { getClubById } from '../../database/repositories/club-repository.js';
 import { getTournamentById } from '../../database/repositories/tournament-repository.js';
-import { tournaments, tournamentEntries, payments as paymentsTable, type PaymentStatus } from '../../database/schema/index.js';
+import { tournaments, tournamentEntries, type PaymentStatus } from '../../database/schema/index.js';
+import { createPayment } from '../../database/repositories/payment-repository.js';
 import { refreshTournamentAnnouncement } from '../../services/tournament-announcement-service.js';
 import { recordAuditEvent, newCorrelationId } from '../../domain/audit/audit-log.js';
 import { PermissionError, StalePanelError, ValidationError } from '../../types/errors.js';
@@ -120,6 +122,7 @@ async function buildPaymentPanel(ctx: AppContext, entryId: string): Promise<{ em
         inline: true,
       },
       { name: 'Late payment override', value: entry.latePaymentOverride ? '✅ Yes' : 'No', inline: true },
+      { name: 'Entry status', value: entry.entryStatus.replace(/_/g, ' '), inline: true },
     );
 
   const rows = [
@@ -135,6 +138,11 @@ async function buildPaymentPanel(ctx: AppContext, entryId: string): Promise<{ em
     ),
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder().setCustomId(encodeCustomId(NAMESPACE, 'note', entryId)).setLabel('Add Staff Note').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(encodeCustomId(NAMESPACE, 'disqualify', entryId))
+        .setLabel('Disqualify Team')
+        .setStyle(ButtonStyle.Danger)
+        .setDisabled(entry.entryStatus !== 'ACTIVE'),
     ),
   ];
 
@@ -170,7 +178,7 @@ async function applyPaymentChange(
     throw error;
   }
 
-  await ctx.db.insert(paymentsTable).values({
+  await createPayment(ctx.db, {
     tournamentEntryId: entryId,
     status: newStatus,
     amountPence: (await getTournamentById(ctx.db, entry.tournamentId))?.entryFeePence ?? 0,
@@ -240,7 +248,7 @@ export async function handlePaymentsComponent(
     const note = interaction.fields.getTextInputValue('note');
     const entry = await getEntryById(ctx.db, entityId);
     if (!entry) throw new ValidationError('That entry no longer exists.');
-    await ctx.db.insert(paymentsTable).values({
+    await createPayment(ctx.db, {
       tournamentEntryId: entityId,
       status: entry.paymentStatus,
       amountPence: (await getTournamentById(ctx.db, entry.tournamentId))?.entryFeePence ?? 0,
@@ -301,6 +309,42 @@ export async function handlePaymentsComponent(
       });
       const { embed, rows } = await buildPaymentPanel(ctx, entityId);
       await interaction.update({ embeds: [embed], components: rows });
+      return;
+    }
+    case 'disqualify': {
+      const entry = await getEntryById(ctx.db, entityId);
+      if (!entry) throw new ValidationError('That entry no longer exists.');
+      const club = await getClubById(ctx.db, entry.clubId);
+      await interaction.reply({
+        content: `Disqualify **${club?.displayName ?? 'this team'}**? This removes them from the tournament — their remaining fixtures are NOT automatically voided or forfeited; handle those separately from the results panel if needed.`,
+        components: [
+          new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+            new ButtonBuilder().setCustomId(encodeCustomId(NAMESPACE, 'disqualify_confirm', entityId)).setLabel('Yes, disqualify').setStyle(ButtonStyle.Danger),
+          ),
+        ],
+        ephemeral: true,
+      });
+      return;
+    }
+    case 'disqualify_confirm': {
+      const entry = await getEntryById(ctx.db, entityId);
+      if (!entry) throw new ValidationError('That entry no longer exists.');
+      assertEntryTransition(entry.entryStatus, 'DISQUALIFIED');
+      await updateEntryStatus(ctx.db, entry.id, entry.version, { entryStatus: 'DISQUALIFIED' });
+
+      await recordAuditEvent(ctx.db, ctx.logger, {
+        guildId: interaction.guildId!,
+        tournamentId: entry.tournamentId,
+        actorType: 'ADMIN',
+        actorDiscordId: interaction.user.id,
+        action: 'entry.disqualify',
+        targetEntityType: 'tournament_entry',
+        targetEntityId: entityId,
+        correlationId: newCorrelationId(),
+        interactionId: interaction.id,
+      });
+
+      await interaction.update({ content: '✅ Team disqualified.', components: [] });
       return;
     }
   }

@@ -1,5 +1,7 @@
 import {
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -7,10 +9,11 @@ import {
   type StringSelectMenuInteraction,
   type ModalSubmitInteraction,
   type ButtonInteraction,
+  type MessageActionRowComponentBuilder,
 } from 'discord.js';
 import type { AppContext } from '../../types/context.js';
 import type { Fixture } from '../../database/schema/index.js';
-import { getFixtureById, getFixturesByGroup, resolveFixtureResult } from '../../database/repositories/fixture-repository.js';
+import { getFixtureById, getFixturesByGroup, resolveFixtureResult, updateFixtureStatus } from '../../database/repositories/fixture-repository.js';
 import { getEntryById } from '../../database/repositories/entry-repository.js';
 import { getClubById } from '../../database/repositories/club-repository.js';
 import { getGroupById, updateGroupResources } from '../../database/repositories/group-repository.js';
@@ -28,11 +31,14 @@ import {
   type FixtureParentContext,
 } from '../../services/result-submission-service.js';
 import { renderGroupStandingsGraphic } from '../../graphics/renderers/group-standings-renderer.js';
+import { recordGraphic } from '../../database/repositories/graphic-repository.js';
+import { checkAndAdvancePipeline } from '../../services/knockout-trigger-service.js';
 import { assertFixtureTransition, isResolvedFixtureStatus } from '../../domain/fixtures/state-machine.js';
 import { buildResultsPanelEmbed, buildResultsPanelComponents, buildConflictPanelEmbed, buildConflictPanelComponents } from '../embeds/results-panel-embed.js';
 import { encodeCustomId, decodeCustomId } from '../interactions/custom-id.js';
 import { recordAuditEvent, newCorrelationId } from '../../domain/audit/audit-log.js';
 import { NotFoundError, PermissionError, StalePanelError, ValidationError } from '../../types/errors.js';
+import { FORFEIT_WIN_SCORE, FORFEIT_LOSS_SCORE } from '../../config/constants.js';
 
 const NAMESPACE = 'fixture';
 
@@ -149,28 +155,18 @@ export async function handleFixtureSelect(interaction: StringSelectMenuInteracti
       await interaction.reply({ content: `This fixture can't be overridden right now (status: ${fixture.status.replace(/_/g, ' ')}).`, ephemeral: true });
       return;
     }
-    const modal = new ModalBuilder()
-      .setCustomId(encodeCustomId(NAMESPACE, 'staff_modal', fixtureId))
-      .setTitle(`${home} vs ${away}`.slice(0, 45))
-      .addComponents(
-        new ActionRowBuilder<TextInputBuilder>().addComponents(
-          new TextInputBuilder().setCustomId('home_score').setLabel(`${home} score (home)`.slice(0, 45)).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(2),
+    await interaction.reply({
+      content: `**${home} vs ${away}** — pick an action:`,
+      components: [
+        new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(encodeCustomId(NAMESPACE, 'staff_enter_score', fixtureId)).setLabel('Enter Score').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(encodeCustomId(NAMESPACE, 'staff_forfeit_home', fixtureId)).setLabel(`${home} Wins (Forfeit)`.slice(0, 80)).setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(encodeCustomId(NAMESPACE, 'staff_forfeit_away', fixtureId)).setLabel(`${away} Wins (Forfeit)`.slice(0, 80)).setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(encodeCustomId(NAMESPACE, 'staff_void', fixtureId)).setLabel('Void Fixture').setStyle(ButtonStyle.Danger),
         ),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(
-          new TextInputBuilder().setCustomId('away_score').setLabel(`${away} score (away)`.slice(0, 45)).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(2),
-        ),
-        ...(fixture.stage !== 'GROUP'
-          ? [
-              new ActionRowBuilder<TextInputBuilder>().addComponents(
-                new TextInputBuilder().setCustomId('home_pens').setLabel('Home penalties (only if level)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(2),
-              ),
-              new ActionRowBuilder<TextInputBuilder>().addComponents(
-                new TextInputBuilder().setCustomId('away_pens').setLabel('Away penalties (only if level)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(2),
-              ),
-            ]
-          : []),
-      );
-    await interaction.showModal(modal);
+      ],
+      ephemeral: true,
+    });
     return;
   }
 
@@ -217,6 +213,123 @@ export async function handleFixtureSelect(interaction: StringSelectMenuInteracti
         : []),
     );
   await interaction.showModal(modal);
+}
+
+/** The 4 staff-action buttons shown after picking a fixture: enter a real
+ * score (shows the same modal as before), declare a forfeit either way, or
+ * void the fixture entirely. Forfeit/void resolve immediately — no modal,
+ * no matching — same "staff input is authoritative" rule as a normal
+ * staff score override. */
+export async function handleFixtureStaffAction(interaction: ButtonInteraction, ctx: AppContext, action: string, fixtureId: string): Promise<void> {
+  if (!interaction.inGuild() || !interaction.guild) return;
+  const config = await getOrCreateGuildConfig(ctx.db, interaction.guildId);
+  const member = await interaction.guild.members.fetch(interaction.user.id);
+  if (!isStaffMember(member, config)) throw new PermissionError('Staff management only.');
+
+  const fixture = await getFixtureById(ctx.db, fixtureId);
+  if (!fixture) throw new NotFoundError('Fixture');
+  if (!isStaffOverridable(fixture.status)) {
+    await interaction.reply({ content: `This fixture can't be actioned right now (status: ${fixture.status.replace(/_/g, ' ')}).`, ephemeral: true });
+    return;
+  }
+
+  const { home, away } = await teamNames(ctx, fixture);
+
+  if (action === 'staff_enter_score') {
+    const modal = new ModalBuilder()
+      .setCustomId(encodeCustomId(NAMESPACE, 'staff_modal', fixtureId))
+      .setTitle(`${home} vs ${away}`.slice(0, 45))
+      .addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
+          new TextInputBuilder().setCustomId('home_score').setLabel(`${home} score (home)`.slice(0, 45)).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(2),
+        ),
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
+          new TextInputBuilder().setCustomId('away_score').setLabel(`${away} score (away)`.slice(0, 45)).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(2),
+        ),
+        ...(fixture.stage !== 'GROUP'
+          ? [
+              new ActionRowBuilder<TextInputBuilder>().addComponents(
+                new TextInputBuilder().setCustomId('home_pens').setLabel('Home penalties (only if level)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(2),
+              ),
+              new ActionRowBuilder<TextInputBuilder>().addComponents(
+                new TextInputBuilder().setCustomId('away_pens').setLabel('Away penalties (only if level)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(2),
+              ),
+            ]
+          : []),
+      );
+    await interaction.showModal(modal);
+    return;
+  }
+
+  let resolution: {
+    winnerEntryId: string | null;
+    resolutionSource: 'FORFEIT_HOME' | 'FORFEIT_AWAY' | 'VOID';
+    status: 'FORFEIT' | 'VOID';
+    homeScore: number | null;
+    awayScore: number | null;
+  };
+  let resultLabel: string;
+  if (action === 'staff_forfeit_home') {
+    resolution = {
+      winnerEntryId: fixture.homeEntryId,
+      resolutionSource: 'FORFEIT_AWAY',
+      status: 'FORFEIT',
+      homeScore: FORFEIT_WIN_SCORE,
+      awayScore: FORFEIT_LOSS_SCORE,
+    };
+    resultLabel = `${home} win by forfeit (${away} forfeited).`;
+  } else if (action === 'staff_forfeit_away') {
+    resolution = {
+      winnerEntryId: fixture.awayEntryId,
+      resolutionSource: 'FORFEIT_HOME',
+      status: 'FORFEIT',
+      homeScore: FORFEIT_LOSS_SCORE,
+      awayScore: FORFEIT_WIN_SCORE,
+    };
+    resultLabel = `${away} win by forfeit (${home} forfeited).`;
+  } else if (action === 'staff_void') {
+    resolution = { winnerEntryId: null, resolutionSource: 'VOID', status: 'VOID', homeScore: null, awayScore: null };
+    resultLabel = 'Fixture voided — no winner recorded.';
+  } else {
+    return;
+  }
+
+  let resolved;
+  try {
+    resolved = await resolveFixtureResult(ctx.db, fixture.id, fixture.version, {
+      homeScore: resolution.homeScore,
+      awayScore: resolution.awayScore,
+      decisionMethod: null,
+      winnerEntryId: resolution.winnerEntryId,
+      resolutionSource: resolution.resolutionSource,
+      status: resolution.status,
+    });
+  } catch (error) {
+    if (error instanceof StalePanelError) {
+      await interaction.reply({ content: '⚠️ This fixture changed since this panel was posted.', ephemeral: true });
+      return;
+    }
+    throw error;
+  }
+
+  const parent = await getFixtureParentContext(ctx.db, fixture);
+  await refreshResultsPanel(ctx, interaction.guild, parent);
+  await checkAndAdvancePipeline(ctx, fixture);
+
+  await recordAuditEvent(ctx.db, ctx.logger, {
+    guildId: interaction.guildId!,
+    tournamentId: fixture.tournamentId,
+    actorType: 'ADMIN',
+    actorDiscordId: interaction.user.id,
+    action: `fixture.${action}`,
+    targetEntityType: 'fixture',
+    targetEntityId: fixture.id,
+    afterState: { status: resolved.status, winnerEntryId: resolved.winnerEntryId },
+    correlationId: newCorrelationId(),
+    interactionId: interaction.id,
+  });
+
+  await interaction.reply({ content: `✅ ${resultLabel}`, ephemeral: true });
 }
 
 export async function handleSubmitResultModal(interaction: ModalSubmitInteraction, ctx: AppContext, fixtureId: string): Promise<void> {
@@ -283,6 +396,7 @@ export async function handleSubmitResultModal(interaction: ModalSubmitInteractio
     return;
   }
   if (outcome.type === 'resolved') {
+    await checkAndAdvancePipeline(ctx, fixture);
     await interaction.reply({ content: '✅ Both sides agree — this fixture is resolved!', ephemeral: true });
     return;
   }
@@ -319,6 +433,7 @@ export async function handleStaffOverrideModal(interaction: ModalSubmitInteracti
 
   const parent = await getFixtureParentContext(ctx.db, fixture);
   await refreshResultsPanel(ctx, interaction.guild, parent);
+  await checkAndAdvancePipeline(ctx, fixture);
 
   await recordAuditEvent(ctx.db, ctx.logger, {
     guildId: interaction.guildId!,
@@ -373,6 +488,48 @@ export async function handleConflictResolutionButton(interaction: ButtonInteract
     return;
   }
 
+  if (action === 'request_evidence') {
+    try {
+      assertFixtureTransition(fixture.status, 'EVIDENCE_REQUESTED');
+      await updateFixtureStatus(ctx.db, fixture.id, fixture.version, 'EVIDENCE_REQUESTED');
+    } catch (error) {
+      if (error instanceof StalePanelError) {
+        await interaction.reply({ content: '⚠️ This fixture changed since this panel was posted.', ephemeral: true });
+        return;
+      }
+      throw error;
+    }
+
+    const parent = await getFixtureParentContext(ctx.db, fixture);
+    const { home, away } = await teamNames(ctx, fixture);
+    if (parent.chatChannelId) {
+      const channel = await interaction.guild.channels.fetch(parent.chatChannelId).catch(() => null);
+      if (channel?.isTextBased()) {
+        await channel
+          .send(
+            `📋 **${home} vs ${away}**: your submitted results don't match. Please post screenshots proving your result here, ` +
+              'or open a dispute ticket if you need staff to step in directly.',
+          )
+          .catch(() => {});
+      }
+    }
+
+    await recordAuditEvent(ctx.db, ctx.logger, {
+      guildId: interaction.guildId!,
+      tournamentId: fixture.tournamentId,
+      actorType: 'ADMIN',
+      actorDiscordId: interaction.user.id,
+      action: 'fixture.request_evidence',
+      targetEntityType: 'fixture',
+      targetEntityId: fixture.id,
+      correlationId: newCorrelationId(),
+      interactionId: interaction.id,
+    });
+
+    await interaction.reply({ content: '✅ Evidence requested — both teams have been asked to post screenshots.', ephemeral: true });
+    return;
+  }
+
   const submissions = await getFixtureSubmissions(ctx.db, fixture.id);
   if (submissions.length < 2) {
     await interaction.reply({ content: 'This conflict no longer has two active submissions to choose from.', ephemeral: true });
@@ -406,6 +563,7 @@ export async function handleConflictResolutionButton(interaction: ButtonInteract
 
   const parent = await getFixtureParentContext(ctx.db, fixture);
   await refreshResultsPanel(ctx, interaction.guild, parent);
+  await checkAndAdvancePipeline(ctx, fixture);
 
   await recordAuditEvent(ctx.db, ctx.logger, {
     guildId: interaction.guildId!,
@@ -469,6 +627,13 @@ export async function handleConfirmGroupButton(interaction: ButtonInteraction, c
     },
     ctx.env.GRAPHICS_CACHE_DIR,
   );
+  await recordGraphic(ctx.db, {
+    tournamentId: group.tournamentId,
+    groupId: group.id,
+    graphicType: 'GROUP_STANDINGS',
+    contentHash: graphic.contentHash,
+    filePath: graphic.filePath,
+  });
 
   const roleMention = group.roleId ? `<@&${group.roleId}> ` : '';
   const message = await chatChannel.send({

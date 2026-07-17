@@ -3,8 +3,10 @@ import type { AppContext } from '../../types/context.js';
 import { getOrCreateGuildConfig } from '../../database/repositories/guild-config-repository.js';
 import { getGroupsByTournament, getGroupMemberships } from '../../database/repositories/group-repository.js';
 import { getFixturesByGroup, getFixturesByKnockoutRound, createFixture } from '../../database/repositories/fixture-repository.js';
-import { getEntryById, updateEntryStatus } from '../../database/repositories/entry-repository.js';
+import { getEntryById, updateEntryStatus, updatePaymentStatus } from '../../database/repositories/entry-repository.js';
 import { getClubById } from '../../database/repositories/club-repository.js';
+import { PRIZE_DETAILS_DEADLINE_HOURS } from '../../config/constants.js';
+import { DateTime } from 'luxon';
 import {
   createKnockoutRound,
   getLatestKnockoutRound,
@@ -13,10 +15,13 @@ import {
 import { calculateQualification, type GroupStandingsInput } from '../../domain/qualification/qualification.js';
 import { drawKnockoutPairings, stageForEntrantCount, STAGE_LABELS } from '../../domain/knockouts/knockout-draw.js';
 import { assertEntryTransition } from '../../domain/entries/state-machine.js';
+import { isResolvedFixtureStatus } from '../../domain/fixtures/state-machine.js';
 import { advanceTournamentTo } from '../../services/tournament-progression-service.js';
 import { ensureKnockoutRoundResources } from '../../services/discord-resource-service.js';
 import { computeGroupStandings } from '../../services/result-submission-service.js';
 import { renderKnockoutBracketGraphic } from '../../graphics/renderers/knockout-bracket-renderer.js';
+import { renderWinnerAnnouncementGraphic } from '../../graphics/renderers/winner-announcement-renderer.js';
+import { recordGraphic } from '../../database/repositories/graphic-repository.js';
 import { buildResultsPanelEmbed, buildResultsPanelComponents } from '../../discord/embeds/results-panel-embed.js';
 import { recordAuditEvent, newCorrelationId } from '../../domain/audit/audit-log.js';
 
@@ -124,6 +129,13 @@ async function publishKnockoutRound(
     },
     ctx.env.GRAPHICS_CACHE_DIR,
   );
+  await recordGraphic(ctx.db, {
+    tournamentId: tournament.id,
+    knockoutRoundId: round.id,
+    graphicType: 'KNOCKOUT_BRACKET',
+    contentHash: graphic.contentHash,
+    filePath: graphic.filePath,
+  });
   const message = await resources.chatChannel.send({
     content: [
       `${resources.role} the draw is in for **${stageLabel}**!`,
@@ -189,7 +201,7 @@ export async function runInitialKnockoutDraw(
     const memberships = await getGroupMemberships(ctx.db, group.id);
     const groupFixtures = await getFixturesByGroup(ctx.db, group.id);
 
-    const unresolved = groupFixtures.filter((f) => f.status !== 'RESOLVED');
+    const unresolved = groupFixtures.filter((f) => !isResolvedFixtureStatus(f.status));
     if (unresolved.length > 0) {
       throw new Error(`Group ${group.groupCode} has ${unresolved.length} unresolved fixture(s) — cannot calculate qualifiers yet.`);
     }
@@ -270,7 +282,7 @@ export async function advanceKnockoutRound(
   }
 
   const roundFixtures = await getFixturesByKnockoutRound(ctx.db, latestRound.id);
-  const unresolved = roundFixtures.filter((f) => f.status !== 'RESOLVED');
+  const unresolved = roundFixtures.filter((f) => !isResolvedFixtureStatus(f.status));
   if (unresolved.length > 0) {
     throw new Error(`${STAGE_LABELS[latestRound.stage]} still has ${unresolved.length} unresolved fixture(s) — cannot advance yet.`);
   }
@@ -298,7 +310,15 @@ export async function advanceKnockoutRound(
     const champion = await getEntryById(ctx.db, winners[0]!.entryId);
     if (champion && champion.entryStatus === 'ACTIVE') {
       assertEntryTransition('ACTIVE', 'WINNER');
-      await updateEntryStatus(ctx.db, champion.id, champion.version, { entryStatus: 'WINNER' });
+      const winnerEntry = await updateEntryStatus(ctx.db, champion.id, champion.version, { entryStatus: 'WINNER' });
+      await updatePaymentStatus(ctx.db, winnerEntry.id, winnerEntry.version, { paymentStatus: 'PRIZE_PENDING' });
+      await ctx.scheduler.enqueue({
+        tournamentId: tournament.id,
+        jobType: 'PRIZE_DETAILS_DEADLINE',
+        runAt: DateTime.now().plus({ hours: PRIZE_DETAILS_DEADLINE_HOURS }).toJSDate(),
+        idempotencyKey: `PRIZE_DETAILS_DEADLINE:${winnerEntry.id}`,
+        payload: { entryId: winnerEntry.id },
+      });
     }
 
     let current = tournament;
@@ -309,7 +329,21 @@ export async function advanceKnockoutRound(
     if (latestRound.resultsChannelId) {
       const channel = await guild.channels.fetch(latestRound.resultsChannelId).catch(() => null);
       if (channel?.isTextBased()) {
-        await channel.send(`🏆 **${winners[0]!.teamName}** are the champions of **${tournament.name}**!`);
+        const graphic = await renderWinnerAnnouncementGraphic(
+          { tournamentName: tournament.name, championTeamName: winners[0]!.teamName },
+          ctx.env.GRAPHICS_CACHE_DIR,
+        );
+        await recordGraphic(ctx.db, {
+          tournamentId: tournament.id,
+          knockoutRoundId: latestRound.id,
+          graphicType: 'WINNER_ANNOUNCEMENT',
+          contentHash: graphic.contentHash,
+          filePath: graphic.filePath,
+        });
+        await channel.send({
+          content: `🏆 **${winners[0]!.teamName}** are the champions of **${tournament.name}**!`,
+          files: [{ attachment: graphic.buffer, name: 'champions.png' }],
+        });
       }
     }
 

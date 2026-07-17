@@ -28,9 +28,12 @@ import {
   handleFixtureSelect,
   handleSubmitResultModal,
   handleStaffOverrideModal,
+  handleFixtureStaffAction,
   handleConflictResolutionButton,
   handleConfirmGroupButton,
 } from '../components/result-submission-flow.js';
+import { handleConfirmRosterButton } from '../components/group-confirmation-flow.js';
+import { handleRepairComponent } from '../commands/tournament-repair.js';
 
 /**
  * Single entry point for every Discord interaction. This is the "global
@@ -126,6 +129,12 @@ export async function routeInteraction(interaction: Interaction, ctx: AppContext
           } else if (action === 'staff_modal' && interaction.isModalSubmit()) {
             const fixtureId = parts[0]!;
             await handleStaffOverrideModal(interaction, ctx, fixtureId);
+          } else if (
+            (action === 'staff_enter_score' || action === 'staff_forfeit_home' || action === 'staff_forfeit_away' || action === 'staff_void') &&
+            interaction.isButton()
+          ) {
+            const fixtureId = parts[0]!;
+            await handleFixtureStaffAction(interaction, ctx, action, fixtureId);
           }
           return;
         }
@@ -140,6 +149,15 @@ export async function routeInteraction(interaction: Interaction, ctx: AppContext
         case 'group': {
           if (action === 'confirm' && interaction.isButton()) {
             await handleConfirmGroupButton(interaction, ctx, parts[0]!);
+          } else if (action === 'confirm_roster' && interaction.isButton()) {
+            await handleConfirmRosterButton(interaction, ctx, parts[0]!);
+          }
+          return;
+        }
+
+        case 'tournament_repair': {
+          if (interaction.isButton()) {
+            await handleRepairComponent(interaction, ctx);
           }
           return;
         }

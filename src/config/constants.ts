@@ -42,6 +42,12 @@ export const POINTS_WIN = 3;
 export const POINTS_DRAW = 1;
 export const POINTS_LOSS = 0;
 
+/** Conventional scoreline recorded for a forfeit win, so forfeited fixtures
+ * flow through standings/qualification exactly like a normal result instead
+ * of needing to be special-cased. */
+export const FORFEIT_WIN_SCORE = 3;
+export const FORFEIT_LOSS_SCORE = 0;
+
 export const GRAPHIC_DIMENSIONS = { width: 1080, height: 1080 } as const;
 export const KNOCKOUT_GRAPHIC_DIMENSIONS = { width: 1920, height: 1080 } as const;
 

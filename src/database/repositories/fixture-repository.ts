@@ -27,20 +27,24 @@ export async function getFixturesByTournament(db: Database, tournamentId: string
 }
 
 /** Resolves a fixture's result. This is the one place a fixture's score
- * gets written, whether that's the (not-yet-built) dual-submission flow, a
- * staff override, or /tournament test's simulated results — all funnel
- * through here so "RESOLVED means version bumped + resolvedAt stamped"
- * never drifts between callers. */
+ * gets written, whether that's the dual-submission flow, a staff score
+ * override, a staff void/forfeit, or /tournament test's simulated
+ * results — all funnel through here so "resolved means version bumped +
+ * resolvedAt stamped" never drifts between callers. `status` defaults to
+ * RESOLVED (a real played score); pass FORFEIT or VOID for those cases —
+ * homeScore/awayScore/decisionMethod are nullable because neither has a
+ * real scoreline. */
 export async function resolveFixtureResult(
   db: Database,
   id: string,
   expectedVersion: number,
   result: {
-    homeScore: number;
-    awayScore: number;
+    homeScore: number | null;
+    awayScore: number | null;
     winnerEntryId: string | null;
-    decisionMethod: DecisionMethod;
+    decisionMethod: DecisionMethod | null;
     resolutionSource: ResolutionSource;
+    status?: 'RESOLVED' | 'FORFEIT' | 'VOID';
   },
 ): Promise<Fixture> {
   const [updated] = await db
@@ -51,7 +55,7 @@ export async function resolveFixtureResult(
       winnerEntryId: result.winnerEntryId,
       decisionMethod: result.decisionMethod,
       resolutionSource: result.resolutionSource,
-      status: 'RESOLVED',
+      status: result.status ?? 'RESOLVED',
       resolvedAt: new Date(),
       version: sql`${fixtures.version} + 1`,
       updatedAt: new Date(),

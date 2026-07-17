@@ -142,6 +142,7 @@ export function buildConflictPanelComponents(fixtureId: string): ActionRowBuilde
       new ButtonBuilder().setCustomId(encodeCustomId('result_conflict', 'accept_one', fixtureId)).setLabel('Accept Submission 1').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(encodeCustomId('result_conflict', 'accept_two', fixtureId)).setLabel('Accept Submission 2').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(encodeCustomId('result_conflict', 'override', fixtureId)).setLabel('Manual Override').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(encodeCustomId('result_conflict', 'request_evidence', fixtureId)).setLabel('Request Evidence').setStyle(ButtonStyle.Primary),
     ),
   ];
 }

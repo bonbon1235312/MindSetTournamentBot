@@ -14,7 +14,10 @@ import { assertEntryTransition } from '../../domain/entries/state-machine.js';
 import { resolveSchedule } from '../../domain/tournaments/schedule.js';
 import { renderGroupFixturesGraphic } from '../../graphics/renderers/group-fixtures-renderer.js';
 import { buildResultsPanelEmbed, buildResultsPanelComponents } from '../../discord/embeds/results-panel-embed.js';
+import { buildRosterConfirmationEmbed, buildRosterConfirmationComponents } from '../../discord/components/group-confirmation-flow.js';
+import { recordGraphic } from '../../database/repositories/graphic-repository.js';
 import { recordAuditEvent, newCorrelationId } from '../../domain/audit/audit-log.js';
+import { GROUP_CONFIRMATION_REMINDER_OFFSETS_MINUTES, GROUP_CONFIRMATION_DEADLINE_MINUTES } from '../../config/constants.js';
 import type { TemplateSchedule } from '../../database/schema/tournament-templates.js';
 import { DateTime } from 'luxon';
 
@@ -140,6 +143,29 @@ export async function runGroupPublishPipeline(
       }
     }
 
+    await resources.chatChannel.send({
+      embeds: [buildRosterConfirmationEmbed(groupCode)],
+      components: buildRosterConfirmationComponents(group.id),
+      allowedMentions: { roles: [resources.role.id] },
+    });
+    const groupPublishedAt = new Date();
+    for (const offsetMinutes of GROUP_CONFIRMATION_REMINDER_OFFSETS_MINUTES) {
+      await ctx.scheduler.enqueue({
+        tournamentId,
+        jobType: 'GROUP_CONFIRMATION_REMINDER',
+        runAt: DateTime.fromJSDate(groupPublishedAt).plus({ minutes: offsetMinutes }).toJSDate(),
+        idempotencyKey: `GROUP_CONFIRMATION_REMINDER:${group.id}:${offsetMinutes}`,
+        payload: { groupId: group.id },
+      });
+    }
+    await ctx.scheduler.enqueue({
+      tournamentId,
+      jobType: 'GROUP_CONFIRMATION_DEADLINE',
+      runAt: DateTime.fromJSDate(groupPublishedAt).plus({ minutes: GROUP_CONFIRMATION_DEADLINE_MINUTES }).toJSDate(),
+      idempotencyKey: `GROUP_CONFIRMATION_DEADLINE:${group.id}`,
+      payload: { groupId: group.id },
+    });
+
     const roundRobin = generateRoundRobinFixtures(groupDraw.entries);
     const createdFixtures = [];
     for (const fixture of roundRobin) {
@@ -179,6 +205,13 @@ export async function runGroupPublishPipeline(
       { tournamentName: tournament.name, groupCode, rounds: graphicRounds },
       ctx.env.GRAPHICS_CACHE_DIR,
     );
+    await recordGraphic(ctx.db, {
+      tournamentId,
+      groupId: group.id,
+      graphicType: 'GROUP_FIXTURES',
+      contentHash: graphic.contentHash,
+      filePath: graphic.filePath,
+    });
     const message = await resources.chatChannel.send({
       content: [
         `${resources.role} you've been drawn into **Group ${groupCode}**!`,

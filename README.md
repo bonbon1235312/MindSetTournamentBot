@@ -9,18 +9,23 @@ ticket system and welcome/goodbye messages.
 
 > **Current status:** every pipeline a real cup needs to run start-to-finish
 > is built and verified live — signup, payment tracking, groups, dual-sided
-> result submission (with staff conflict resolution), knockout progression,
-> and a declared champion. The tournament clock fires automatically:
-> signups close, groups get generated, fixtures open for submission at
-> kickoff, and once results come in the knockout stage draws and plays
-> itself out to a winner — all without staff intervention. What's left
-> (reminders, staff alerts, midnight cleanup, an evidence/dispute system)
-> is edge-case tooling, not anything on the critical path — see
-> [PLAN.md](./PLAN.md#known-gaps) for the exact list. Welcome/goodbye
-> messages are built but **blocked**: they need the GuildMembers privileged
-> intent enabled in the Discord Developer Portal (Bot tab → Server Members
-> Intent) — see below. Only one cash cup runs at a time per server, posted
-> to one fixed sign-up channel — see "Creating a tournament" below.
+> result submission (with staff conflict resolution and an evidence/dispute
+> request), knockout progression, and a declared champion. The tournament
+> clock fires automatically end-to-end: signups close, groups get
+> generated, fixtures open for submission at kickoff, overdue fixtures get
+> reminded and then staff-alerted, and once results come in — including
+> staff-entered voids and forfeits — the knockout stage automatically draws
+> and plays itself out to a winner, the winner is marked prize-pending with
+> a 24h staff reminder, and the tournament finalizes itself at midnight
+> cleanup, all without staff intervention. Staff also have void/forfeit/
+> disqualify overrides and a `/tournament repair` diagnostic + force-
+> progression command for edge cases — see
+> [PLAN.md](./PLAN.md#known-gaps) for the two remaining, deliberately-scoped
+> gaps. Welcome/goodbye messages are built but **blocked**: they need the
+> GuildMembers privileged intent enabled in the Discord Developer Portal
+> (Bot tab → Server Members Intent) — see below. Only one cash cup runs at
+> a time per server, posted to one fixed sign-up channel — see "Creating a
+> tournament" below.
 
 ## Feature list
 
@@ -59,12 +64,32 @@ ticket system and welcome/goodbye messages.
 - Staff "Confirm Group Complete" button once every fixture in a group is
   resolved — posts the final standings graphic pinging the group role and
   pins it, one-time only
+- Automatic knockout progression: the moment every fixture in every group
+  reaches a terminal state, the knockout draw fires on its own; the moment
+  a knockout round is fully resolved, the next round draws itself, all the
+  way to a declared champion — no staff button required
+- Pre-kickoff "Confirm My Roster" button per group, with staged reminders
+  and a deadline that flags any still-unconfirmed team to staff (no
+  automatic reserve promotion — a human always makes that call)
+- Overdue-fixture reminders: a first ping to whichever side hasn't
+  submitted, then a staff alert (and an `OVERDUE` status) if it's still
+  outstanding
+- Staff void/forfeit/disqualify overrides on any fixture or entry, all
+  audit-logged and feeding the same automatic knockout-progression trigger
+  as a normal result
+- Winner marked prize-pending with a 24-hour staff reminder if unpaid — a
+  staff nudge only, this bot never collects payment details or moves money
+- Automatic midnight cleanup finalizes a finished tournament's status, and
+  `/tournament repair` gives staff a diagnostic report plus a manual
+  force-progression button for anything that gets stuck
+- "Request Evidence" button on the staff conflict panel, routing disputing
+  teams to the ticket system for screenshots
 - Fixtures graphic posted and pinned at the top of each group/round's chat
   channel; the results channel is reserved for the results panel
 - Branded, monochrome SVG→PNG tournament graphics (group fixtures, group
-  standings, knockout bracket) with the MindSet shield logo embedded,
-  rendered via Sharp with content-hash caching so unchanged data never
-  re-renders
+  standings, knockout bracket, winner announcement) with the MindSet
+  shield logo embedded, rendered via Sharp with content-hash caching so
+  unchanged data never re-renders
 - Database-backed job scheduler (`FOR UPDATE SKIP LOCKED` row-locking, so
   multiple bot processes can never double-claim a job), with retry backoff,
   dead-lettering, and crash-lease reconciliation on startup — and the
@@ -273,20 +298,27 @@ managers and staff (see the Product Overview in [PLAN.md](./PLAN.md)).
 
 `/payments` opens the staff payment control panel: pick a tournament, pick
 a team from a searchable list, and use Confirm/Undo/Reject/Refund-tracking
-buttons. Every action is logged to the audit-events table.
+buttons, plus a **Disqualify Team** button (with a confirm step) for
+removing an active entry from the competition entirely. Every action is
+logged to the audit-events table.
 
 ## Running groups
 
 Fully automatic once a tournament is created — `/tournament create`
-enqueues `PREMIUM_CUTOFF`, `SIGNUP_CLOSE`, and `GROUP_PUBLISH` jobs at their
-resolved schedule times. At kickoff, `GROUP_PUBLISH` builds the eligible
-(payment-confirmed) pool, runs the random draw, creates each group's own
-category + role + `chat`/`results`/`staff` channels, assigns the group role
-to every manager/co-manager, generates the round-robin fixtures, posts and
-pins the fixtures graphic in the chat channel, posts the results panel in
-the results channel, and enqueues a `FIXTURE_READY` job per fixture for its
-scheduled kickoff time — all verified live against a real tournament and
-the real guild.
+enqueues `PREMIUM_CUTOFF`, `SIGNUP_CLOSE`, `GROUP_PUBLISH`, and
+`MIDNIGHT_CLEANUP` jobs at their resolved schedule times. At kickoff,
+`GROUP_PUBLISH` builds the eligible (payment-confirmed) pool, runs the
+random draw, creates each group's own category + role + `chat`/`results`/
+`staff` channels, assigns the group role to every manager/co-manager,
+generates the round-robin fixtures, posts and pins the fixtures graphic in
+the chat channel, posts a roster-confirmation panel and the results panel,
+and enqueues a `FIXTURE_READY` job per fixture plus the group's
+`GROUP_CONFIRMATION_REMINDER`/`GROUP_CONFIRMATION_DEADLINE` jobs — all
+verified live against a real tournament and the real guild. From there,
+overdue-fixture reminders, the automatic knockout draw/advance, the prize-
+pending deadline, and midnight cleanup all run themselves without staff
+intervention (see "Result submission, staff conflict resolution" and
+"Cleanup / Repair system" below).
 
 ## Testing the tournament flow — `/tournament test`
 
@@ -353,26 +385,33 @@ Once every fixture in a group is resolved, staff get a **Confirm Group
 Complete** button on that group's results panel (disabled until every
 fixture actually has a result). Confirming posts the final standings
 graphic in the group's chat channel, pinging the group role and pinning
-it, and locks the button so it can't be triggered twice. This does **not**
-automatically trigger the knockout draw — see "Testing the tournament
-flow" above for the one place that currently does
-(`/tournament test`'s simulation); there's still no automatic "all group
-fixtures resolved" trigger for it in production.
+it, and locks the button so it can't be triggered twice. Separately —
+whether or not staff ever click that button — the moment every fixture in
+every group of the tournament reaches a terminal status
+(`RESOLVED`/`FORFEIT`/`VOID`), the knockout draw fires **automatically**;
+the same automatic trigger fires the next round once the current one's
+fixtures are all settled, all the way to a declared champion. Staff can
+also void a fixture, award a forfeit win (with a conventional 3-0
+scoreline so it counts correctly in standings), or disqualify a team
+entirely from the results panel / payment panel — all of these feed the
+same automatic trigger.
 
 The domain logic behind all of this (standings, qualification, knockout
 draw, home/away result normalization, knockout-specific validation) was
 built and unit-tested earlier in this project; this is the Discord-facing
 wiring that finally calls it. Verified live against the real database and
 guild: a matching dual submission, a mismatched one, a staff override, an
-unauthorized submission attempt, and a group confirmation (including
-correctly rejecting a second attempt) all behaved correctly. What couldn't
-be verified interactively is the actual button-click/modal-submit UI —
-there's no second Discord account available to click as a "user" distinct
-from staff (same limitation as the ticket system) — verification went
-through the same service functions the real Discord handlers call. See
-[PLAN.md's "Known gaps"](./PLAN.md#known-gaps) for what's still separately
-missing: confirmation/overdue reminders, prize-deadline and midnight-cleanup
-jobs, and an evidence/dispute system.
+unauthorized submission attempt, a group confirmation (including correctly
+rejecting a second attempt), a void, a forfeit (with standings credit
+confirmed), and a full automatic run from every group fixture resolved
+through to a declared champion, prize-pending handoff, and midnight
+cleanup all behaved correctly. What couldn't be verified interactively is
+the actual button-click/modal-submit UI — there's no second Discord
+account available to click as a "user" distinct from staff (same
+limitation as the ticket system) — verification went through the same
+service functions the real Discord handlers call. See
+[PLAN.md's "Known gaps"](./PLAN.md#known-gaps) for the two remaining,
+deliberately-scoped gaps.
 
 ## Tickets
 
@@ -394,9 +433,20 @@ in `REQUIRED_INTENTS`.
 
 ## Cleanup / Repair system
 
-Not yet implemented (sections 33/34 of the original spec). Do not rely on
-automatic midnight cleanup or the `/tournament repair` command yet — neither
-exists in this codebase.
+Every tournament gets a `MIDNIGHT_CLEANUP` job enqueued at its scheduled
+cleanup time. A tournament that's `COMPLETED`/`CANCELLED` by then is
+walked to `CLEANED` automatically — a status marker only, this never
+deletes real Discord resources or database rows (unlike `/tournament
+test`'s diagnostic cleanup, which only ever touches its own throwaway test
+tournaments). A tournament still mid-flight past its own midnight is left
+alone and staff get an alert pointing them at `/tournament repair`.
+
+`/tournament repair` (staff-only) shows a diagnostic report for the
+guild's currently active tournament — per-group fixture/roster-
+confirmation counts, per-knockout-round status, and how many fixtures are
+overdue — with a **Force Check Progression** button that manually re-runs
+the automatic knockout-advance check for every group and round, for the
+rare case where the automatic trigger didn't fire on its own.
 
 ## Troubleshooting
 
@@ -470,6 +520,35 @@ connection string.
       the group role, pins it, and the button becomes disabled/relabeled
       "✅ Group Confirmed" — clicking again (or via another group) is
       correctly refused if already confirmed
+- [ ] The "Confirm My Roster" button on a group's chat channel marks the
+      clicking manager's entry `CONFIRMED`; an entry still `PENDING` at the
+      deadline is marked `INACTIVE_PENDING_REPLACEMENT` and staff are
+      alerted in the group's staff channel
+- [ ] A fixture left unsubmitted gets a reminder ping, then (if still
+      unsubmitted) flips to `OVERDUE` with a staff alert
+- [ ] Staff can void a fixture (no score, no winner) or award a forfeit win
+      (correct winner, 3-0 scoreline, and the win shows up in the group
+      standings) from the results panel's staff action buttons
+- [ ] The moment every fixture in every group reaches a terminal status,
+      the knockout draw fires **without** clicking anything; the moment a
+      knockout round is fully resolved, the next round draws itself the
+      same way, all the way to a declared champion and tournament status
+      `COMPLETED`
+- [ ] The declared champion gets a graphic announcement (not a plain
+      message) and is marked `PRIZE_PENDING`
+- [ ] `/tournament repair` shows a diagnostic report for the active
+      tournament, and its "Force Check Progression" button re-runs the
+      knockout-advance check without erroring on an already-current
+      tournament
+- [ ] The staff conflict panel's "Accept Submission 1/2", "Manual
+      Override", and "Request Evidence" buttons all behave correctly —
+      Request Evidence moves the fixture to `EVIDENCE_REQUESTED` and posts
+      to the group/round's chat channel
+- [ ] A manager cannot submit for a fixture they aren't part of (rejected
+      with a permission error, both at fixture-select time and if a
+      submission is somehow forced through to the modal-submit step)
+- [ ] `/payments`' "Disqualify Team" button (with its confirm step)
+      correctly marks an entry `DISQUALIFIED`
 - [ ] `/tournament test` (default options) reports all phases ✅ — including
       the knockout pipeline phases, ending in a declared champion and
       tournament status `COMPLETED` — and cleans up after itself; check the
