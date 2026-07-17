@@ -63,3 +63,40 @@ export async function advanceTournamentTo(db: Database, tournament: Tournament, 
   }
   return current;
 }
+
+/**
+ * Walks a COMPLETED or CANCELLED tournament through to CLEANED — a
+ * terminal branch off the main lifecycle (see the state machine), not a
+ * continuation of STATUS_PATH above, so this walks it directly via
+ * assertTournamentTransition rather than through advanceTournamentTo
+ * (which would correctly reject CLEANING_UP/CLEANED as off its path).
+ * Status-only: never touches Discord resources or database rows beyond
+ * the tournament's own status column.
+ */
+export async function finalizeToCleaned(db: Database, tournament: Tournament): Promise<Tournament> {
+  let current = tournament;
+  if (current.status !== 'CLEANING_UP' && current.status !== 'CLEANED') {
+    assertTournamentTransition(current.status, 'CLEANING_UP');
+    current = await updateTournamentStatus(db, current.id, current.version, 'CLEANING_UP');
+  }
+  if (current.status !== 'CLEANED') {
+    assertTournamentTransition(current.status, 'CLEANED');
+    current = await updateTournamentStatus(db, current.id, current.version, 'CLEANED');
+  }
+  return current;
+}
+
+/**
+ * Staff-initiated cancellation (e.g. a stuck test tournament, or a real
+ * cup called off) — moves straight to CANCELLED from wherever the
+ * tournament currently sits (legal from any non-terminal status per the
+ * state machine), then immediately finishes the CLEANING_UP -> CLEANED
+ * walk so it stops blocking the "one cup at a time" active-tournament
+ * check right away, rather than waiting on a MIDNIGHT_CLEANUP job that
+ * may not exist for this tournament yet.
+ */
+export async function cancelAndFinalizeTournament(db: Database, tournament: Tournament): Promise<Tournament> {
+  assertTournamentTransition(tournament.status, 'CANCELLED');
+  const cancelled = await updateTournamentStatus(db, tournament.id, tournament.version, 'CANCELLED');
+  return finalizeToCleaned(db, cancelled);
+}

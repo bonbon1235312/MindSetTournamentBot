@@ -8,15 +8,17 @@ import { getKnockoutRoundsByTournament } from '../../database/repositories/knock
 import { isResolvedFixtureStatus } from '../../domain/fixtures/state-machine.js';
 import { STAGE_LABELS } from '../../domain/knockouts/knockout-draw.js';
 import { forceCheckTournamentProgression } from '../../services/knockout-trigger-service.js';
+import { cancelAndFinalizeTournament } from '../../services/tournament-progression-service.js';
 import { encodeCustomId, decodeCustomId } from '../interactions/custom-id.js';
 import { getOrCreateGuildConfig } from '../../database/repositories/guild-config-repository.js';
 import { isStaffMember } from '../permissions/staff.js';
-import { PermissionError } from '../../types/errors.js';
+import { recordAuditEvent, newCorrelationId } from '../../domain/audit/audit-log.js';
+import { PermissionError, StalePanelError, ValidationError } from '../../types/errors.js';
 
 const NAMESPACE = 'tournament_repair';
 
 export function addTournamentRepairSubcommand(sub: SlashCommandSubcommandBuilder): SlashCommandSubcommandBuilder {
-  return sub.setName('repair').setDescription('Diagnostic report on the current tournament, with a manual pipeline-advance safety net (staff only)');
+  return sub.setName('repair').setDescription('Diagnostic report on the current tournament — force-advance or cancel it (staff only)');
 }
 
 async function buildRepairReport(ctx: AppContext, tournamentId: string): Promise<{ embed: EmbedBuilder; components: ActionRowBuilder<MessageActionRowComponentBuilder>[] }> {
@@ -67,6 +69,7 @@ async function buildRepairReport(ctx: AppContext, tournamentId: string): Promise
   const components = [
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder().setCustomId(encodeCustomId(NAMESPACE, 'force_check', tournamentId)).setLabel('Force Check Progression').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(encodeCustomId(NAMESPACE, 'cancel', tournamentId)).setLabel('Cancel Tournament').setStyle(ButtonStyle.Danger),
     ),
   ];
 
@@ -93,10 +96,62 @@ export async function handleRepairComponent(interaction: ButtonInteraction, ctx:
   if (!isStaffMember(member, config)) throw new PermissionError('Staff management only.');
 
   const { action, parts } = decodeCustomId(interaction.customId);
-  if (action !== 'force_check') return;
   const tournamentId = parts[0]!;
 
-  await forceCheckTournamentProgression(ctx, tournamentId);
-  const { embed, components } = await buildRepairReport(ctx, tournamentId);
-  await interaction.update({ embeds: [embed], components });
+  if (action === 'force_check') {
+    await forceCheckTournamentProgression(ctx, tournamentId);
+    const { embed, components } = await buildRepairReport(ctx, tournamentId);
+    await interaction.update({ embeds: [embed], components });
+    return;
+  }
+
+  if (action === 'cancel') {
+    const tournament = await getTournamentById(ctx.db, tournamentId);
+    if (!tournament) throw new ValidationError('That tournament no longer exists.');
+    await interaction.reply({
+      content:
+        `Cancel **${tournament.name}** (currently \`${tournament.status}\`)? This ends the tournament — ` +
+        'it stops blocking a new one from being created, but no Discord channels/roles are deleted and no ' +
+        'entry statuses change. Handle any in-progress payments/prizes separately first.',
+      components: [
+        new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(encodeCustomId(NAMESPACE, 'cancel_confirm', tournamentId)).setLabel('Yes, cancel it').setStyle(ButtonStyle.Danger),
+        ),
+      ],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (action === 'cancel_confirm') {
+    const tournament = await getTournamentById(ctx.db, tournamentId);
+    if (!tournament) throw new ValidationError('That tournament no longer exists.');
+
+    let cancelled;
+    try {
+      cancelled = await cancelAndFinalizeTournament(ctx.db, tournament);
+    } catch (error) {
+      if (error instanceof StalePanelError) {
+        await interaction.update({ content: '⚠️ This tournament changed since this report was posted — re-run `/tournament repair` and try again.', components: [] });
+        return;
+      }
+      throw error;
+    }
+
+    await recordAuditEvent(ctx.db, ctx.logger, {
+      guildId: interaction.guildId!,
+      tournamentId: tournament.id,
+      actorType: 'ADMIN',
+      actorDiscordId: interaction.user.id,
+      action: 'tournament.cancel',
+      targetEntityType: 'tournament',
+      targetEntityId: tournament.id,
+      beforeState: { status: tournament.status },
+      afterState: { status: cancelled.status },
+      correlationId: newCorrelationId(),
+      interactionId: interaction.id,
+    });
+
+    await interaction.update({ content: `✅ **${tournament.name}** cancelled and finalized to \`${cancelled.status}\`. A new tournament can now be created.`, components: [] });
+  }
 }

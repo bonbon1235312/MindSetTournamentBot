@@ -1,8 +1,8 @@
 import type { ScheduledJob } from '../../database/schema/index.js';
 import type { AppContext } from '../../types/context.js';
-import { getTournamentById, updateTournamentStatus } from '../../database/repositories/tournament-repository.js';
+import { getTournamentById } from '../../database/repositories/tournament-repository.js';
 import { getOrCreateGuildConfig } from '../../database/repositories/guild-config-repository.js';
-import { assertTournamentTransition } from '../../domain/tournaments/state-machine.js';
+import { finalizeToCleaned } from '../../services/tournament-progression-service.js';
 
 /** Sections 33/34: runs once per tournament, at midnight the night after
  * its scheduled play date. A finished tournament (COMPLETED/CANCELLED)
@@ -25,17 +25,7 @@ export async function handleMidnightCleanup(job: ScheduledJob, ctx: AppContext):
   }
 
   if (tournament.status === 'COMPLETED' || tournament.status === 'CANCELLED') {
-    // COMPLETED/CANCELLED -> CLEANING_UP -> CLEANED is a terminal branch off
-    // the main lifecycle, not part of tournament-progression-service's
-    // linear STATUS_PATH — walked directly here instead of via
-    // advanceTournamentTo.
-    let current = tournament;
-    if (current.status !== 'CLEANING_UP') {
-      assertTournamentTransition(current.status, 'CLEANING_UP');
-      current = await updateTournamentStatus(ctx.db, current.id, current.version, 'CLEANING_UP');
-    }
-    assertTournamentTransition(current.status, 'CLEANED');
-    await updateTournamentStatus(ctx.db, current.id, current.version, 'CLEANED');
+    await finalizeToCleaned(ctx.db, tournament);
     ctx.logger.info({ tournamentId }, 'Tournament finalized to CLEANED at midnight cleanup');
     return;
   }

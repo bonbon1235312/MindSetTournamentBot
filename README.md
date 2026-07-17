@@ -444,9 +444,18 @@ alone and staff get an alert pointing them at `/tournament repair`.
 `/tournament repair` (staff-only) shows a diagnostic report for the
 guild's currently active tournament — per-group fixture/roster-
 confirmation counts, per-knockout-round status, and how many fixtures are
-overdue — with a **Force Check Progression** button that manually re-runs
-the automatic knockout-advance check for every group and round, for the
-rare case where the automatic trigger didn't fire on its own.
+overdue — with two buttons:
+
+- **Force Check Progression** manually re-runs the automatic knockout-
+  advance check for every group and round, for the rare case where the
+  automatic trigger didn't fire on its own.
+- **Cancel Tournament** (behind a confirm step) ends the active
+  tournament and finalizes it straight to `CLEANED`, immediately clearing
+  the "one cup at a time" lock so a new one can be created — the fix for
+  a stuck, mistakenly-created, or abandoned-test tournament. It's
+  status-only: no Discord channels/roles are deleted and no entry/payment
+  data changes, so handle refunds or prize situations separately first if
+  the tournament had real money on the line.
 
 ## Troubleshooting
 
@@ -540,6 +549,10 @@ connection string.
       tournament, and its "Force Check Progression" button re-runs the
       knockout-advance check without erroring on an already-current
       tournament
+- [ ] `/tournament repair`'s "Cancel Tournament" button (behind its "Yes,
+      cancel it" confirm step) ends the active tournament and finalizes it
+      to `CLEANED`; `/tournament create` can then start a new one
+      immediately
 - [ ] The staff conflict panel's "Accept Submission 1/2", "Manual
       Override", and "Request Evidence" buttons all behave correctly —
       Request Evidence moves the fixture to `EVIDENCE_REQUESTED` and posts

@@ -489,16 +489,37 @@ live run.
 `discord/commands/tournament-repair.ts` — staff-only `/tournament repair`:
 builds a diagnostic report (per-group fixture-resolved/roster-confirmed
 counts, per-knockout-round status, total `OVERDUE` fixture count) for the
-guild's active tournament, with a **Force Check Progression** button that
-re-runs `forceCheckTournamentProgression` (the same trigger logic
-described under "Knockout pipeline" above, swallowing `StalePanelError`
-per-group/round so one race loss doesn't abort the whole scan) and
-re-renders the report.
+guild's active tournament, with two buttons:
+
+- **Force Check Progression** re-runs `forceCheckTournamentProgression`
+  (the same trigger logic described under "Knockout pipeline" above,
+  swallowing `StalePanelError` per-group/round so one race loss doesn't
+  abort the whole scan) and re-renders the report.
+- **Cancel Tournament** (with a "Yes, cancel it" confirm step, same
+  two-click pattern as payments' Disqualify Team) calls
+  `cancelAndFinalizeTournament` — moves the tournament straight to
+  `CANCELLED` from wherever it currently sits, then immediately finishes
+  the walk to `CLEANED` in the same call, rather than waiting on a
+  `MIDNIGHT_CLEANUP` job that may not exist for this tournament yet. This
+  is what unblocks "one cup at a time" immediately for a stuck or
+  mistakenly-created tournament — status-only, same as midnight cleanup,
+  never deletes Discord channels/roles or changes entry statuses.
+
+Both `finalizeToCleaned` (the CLEANING_UP→CLEANED walk, shared with
+`handleMidnightCleanup`) and `cancelAndFinalizeTournament` live in
+`services/tournament-progression-service.ts` alongside `advanceTournamentTo`
+— they walk the same CANCELLED/CLEANING_UP/CLEANED terminal branch
+directly via `assertTournamentTransition`, same reasoning as the midnight
+cleanup fix above.
 
 **Verified live end-to-end** via `scripts/verify-full-lifecycle.ts`: a
 completed tournament was correctly walked to `CLEANED`, and
 `forceCheckTournamentProgression` ran cleanly as a no-op against it
-afterwards.
+afterwards. **`cancelAndFinalizeTournament` was verified against a real
+stuck tournament** in the live guild (`KNOCKOUT_LIVE`, left over from an
+earlier manual test run) — correctly walked it to `CLEANED` and confirmed
+`getActiveTournamentForGuild` no longer reported it as blocking, unblocking
+`/tournament create` immediately.
 
 ## Staff override controls
 
