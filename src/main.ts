@@ -1,6 +1,14 @@
 import 'dotenv/config';
+import dns from 'node:dns';
 import { bootstrap } from './app/bootstrap.js';
 import { registerShutdownHandlers } from './app/shutdown.js';
+
+// Prefer IPv4 when resolving hostnames (see bootstrap.cjs for the full
+// rationale). bootstrap.cjs already sets this in production, but this line
+// covers every other entry path — local `npm run dev` (tsx), `npm start`
+// (dist), or `ts-node src/index.ts` — so a broken-IPv6 host can't hang the
+// Discord gateway connection regardless of how the process was launched.
+dns.setDefaultResultOrder('ipv4first');
 
 console.log(`[MindSet boot] application entry loaded (Node ${process.version})`);
 
