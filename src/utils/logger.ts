@@ -15,6 +15,12 @@ export function createLogger(env: Pick<Env, 'LOG_LEVEL' | 'NODE_ENV'>): Logger {
     level: env.LOG_LEVEL,
     base: { pid: process.pid },
     timestamp: pino.stdTimeFunctions.isoTime,
+    // Every call site in this codebase logs errors under the key `error`
+    // (never pino's default `err`), which pino otherwise serializes with a
+    // naive JSON.stringify — producing `{}` for a bare Error, since
+    // message/stack aren't own-enumerable properties. This maps `error` to
+    // pino's real Error serializer so message/stack/cause actually show up.
+    serializers: { error: pino.stdSerializers.err },
   };
 
   if (isDev) {
